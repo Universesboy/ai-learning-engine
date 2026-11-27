@@ -69,6 +69,11 @@ def overview():
     return dashboard.overview(con)
 
 
+@app.get("/api/field")
+def field():
+    return dashboard.field(con)
+
+
 @app.get("/api/library")
 def library():
     return dashboard.library(con)

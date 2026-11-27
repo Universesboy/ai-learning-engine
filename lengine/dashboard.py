@@ -168,7 +168,7 @@ def overview(con: sqlite3.Connection, now: datetime | None = None) -> dict:
                  "book": titles.get(c["book_id"])} for c in due[:10]],
         "weak": [{**{k: c[k] for k in ("id", "name", "book_id", "status", "mastery", "can_apply")},
                   "book": titles.get(c["book_id"])} for c in weak],
-        "recent": recent, "learning": learning[:4], "trend": trend, "usage": _usage(con),
+        "recent": recent, "learning": learning[:4], "books": lib[:4], "trend": trend, "usage": _usage(con),
         "needs_repair": sum(b["needs_repair"] for b in lib),
     }
 
@@ -198,6 +198,21 @@ def book_detail(con: sqlite3.Connection, book_id: int, now: datetime | None = No
     return {"book": book, "summary": _book_summary(book, concepts, chapters, due_cut), "chapters": chapters,
             "concepts": concepts, "prerequisites": prereq, "mistakes": practice.mistakes(con, book_id)[:30],
             "usage": _usage(con, book_id)}
+
+
+def field(con: sqlite3.Connection, now: datetime | None = None) -> dict:
+    """Every concept in the library with its mastery state, laid out book > chapter (for the overview map)."""
+    now = now or datetime.now(timezone.utc)
+    concepts = _concepts(con, None, now)
+    chapters = {r["id"]: dict(r) for r in con.execute("SELECT id, book_id, ord, title FROM chapters")}
+    books = rows(con.execute("SELECT id, title FROM books ORDER BY id"))
+    order = {b["id"]: i for i, b in enumerate(books)}
+    concepts.sort(key=lambda c: (order.get(c["book_id"], 0), chapters.get(c["chapter_id"], {}).get("ord", 0), c["id"]))
+    return {"books": books,
+            "chapters": [{"id": ch["id"], "book_id": ch["book_id"], "ord": ch["ord"], "title": ch["title"]}
+                         for ch in sorted(chapters.values(), key=lambda ch: (order.get(ch["book_id"], 0), ch["ord"]))],
+            "concepts": [[c["id"], c["chapter_id"], c["name"], c["status"],
+                          None if c["forgetting_risk"] is None else round(1 - c["forgetting_risk"], 2)] for c in concepts]}
 
 
 # kept for the scripted run and older callers

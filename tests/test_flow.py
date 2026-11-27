@@ -39,3 +39,13 @@ def test_full_flow(tmp_path, monkeypatch):
     bv = c.get(f"/api/books/{book}").json()
     assert len(bv["mistakes"]) == 2 and bv["concepts"][0]["forgetting_risk"] is not None or True
     assert c.get("/").status_code == 200
+    o = c.get("/api/overview").json()
+    assert o["kpis"]["attempts"] == 3 and o["kpis"]["concepts"] == 3 and o["kpis"]["books"] == 1
+    assert len(c.get("/api/field").json()["concepts"]) == 3
+    lib = c.get("/api/library").json()
+    assert lib[0]["concepts"] == 3 and lib[0]["started"] == 1
+    with PDF.open("rb") as f:  # same file again: not imported twice
+        again = c.post("/api/books", files={"file": ("econ.pdf", f, "application/pdf")}).json()
+    assert again == {"book_id": book, "duplicate": True}
+    assert c.patch(f"/api/books/{book}", json={"author": "OpenStax"}).json()[0]["author"] == "OpenStax"
+    assert c.get("/library/1").status_code == 200  # client-side route serves the app
