@@ -58,6 +58,8 @@ async def upload(file: UploadFile, title: str | None = None, domain: str = "gene
 
 @app.get("/api/books/{book_id}")
 def book(book_id: int):
+    if not con.execute("SELECT 1 FROM books WHERE id=?", (book_id,)).fetchone():
+        raise HTTPException(404, "book not found")
     o = dashboard.book_overview(con, book_id)
     o["path"] = [{"id": c["id"], "name": c["name"], "chapter_id": c["chapter_id"]}
                  for c in knowledge.learning_path(con, book_id)]
