@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -20,8 +21,19 @@ con = db.ThreadLocalConnection(DATA / "engine.db")
 app = FastAPI(title="AI Learning Engine")
 STATIC = Path(__file__).parent / "static"
 DIST = STATIC / "dist"
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+
+class ImmutableStatic(StaticFiles):
+    """Built assets carry a content hash in their name, so browsers may cache them forever."""
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
 if (DIST / "assets").exists():
-    app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+    app.mount("/assets", ImmutableStatic(directory=DIST / "assets"), name="assets")
 _llm = None
 
 
