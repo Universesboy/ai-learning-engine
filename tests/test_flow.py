@@ -6,6 +6,17 @@ from tests.fake_llm import FakeLLM
 
 PDF = Path(__file__).parent.parent / "fixtures" / "econ-ch2-4.pdf"
 
+def wait_job(c, job_id, until=("waiting", "done", "partial", "failed"), timeout=30):
+    import time
+    end = time.time() + timeout
+    while time.time() < end:
+        j = c.get(f"/api/jobs/{job_id}").json()
+        if j["status"] in until:
+            return j
+        time.sleep(0.1)
+    raise AssertionError(f"job stuck: {j}")
+
+
 def test_full_flow(tmp_path, monkeypatch):
     monkeypatch.setenv("ENGINE_DATA", str(tmp_path))
     import lengine.api as api
@@ -13,7 +24,9 @@ def test_full_flow(tmp_path, monkeypatch):
     api._llm = FakeLLM()
     c = TestClient(api.app)
     with PDF.open("rb") as f:
-        book = c.post("/api/books?domain=economics", files={"file": ("econ.pdf", f, "application/pdf")}).json()["book_id"]
+        up = c.post("/api/books?domain=economics", files={"file": ("econ.pdf", f, "application/pdf")}).json()
+    book = up["book_id"]
+    assert wait_job(c, up["job_id"])["status"] == "waiting"  # structure ready, model stages wait for the cost OK
     b = c.get(f"/api/books/{book}").json()
     ch3 = next(ch for ch in b["chapters"] if "Demand" in ch["title"])
     concepts = c.post(f"/api/chapters/{ch3['id']}/map").json()["concepts"]
@@ -46,6 +59,6 @@ def test_full_flow(tmp_path, monkeypatch):
     assert lib[0]["concepts"] == 3 and lib[0]["started"] == 1
     with PDF.open("rb") as f:  # same file again: not imported twice
         again = c.post("/api/books", files={"file": ("econ.pdf", f, "application/pdf")}).json()
-    assert again == {"book_id": book, "duplicate": True}
+    assert again["book_id"] == book and again["duplicate"]
     assert c.patch(f"/api/books/{book}", json={"author": "OpenStax"}).json()[0]["author"] == "OpenStax"
     assert c.get("/library/1").status_code == 200  # client-side route serves the app

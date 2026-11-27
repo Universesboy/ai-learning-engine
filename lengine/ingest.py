@@ -1,14 +1,17 @@
 """Material Hub: turn a PDF into chapters and page-tagged chunks, keeping every page number.
 
-PDF text extraction uses pypdf (BSD) rather than PyMuPDF (AGPL), so the engine stays free to use
-commercially. Chapters come from the PDF outline when it has one, else from heading patterns.
+Text comes from pdfium (pypdfium2, BSD/Apache: ~9x faster than pypdf on a 345-page book) and scanned
+pages fall back to RapidOCR (Apache-2.0); PyMuPDF (AGPL) is avoided so the engine stays free to use.
+Structure comes from the PDF outline when it has one (chapters, parts, preface/appendix/back matter,
+sections), else from "Chapter N / 第N章" headings.
 """
 from __future__ import annotations
 
 from pathlib import Path
 import re
 import sqlite3
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, field
 
 from pypdf import PdfReader
 
@@ -20,24 +23,54 @@ class Chapter:
     title: str
     page_start: int  # 1-based, inclusive
     page_end: int
+    kind: str = "body"  # body | front | conclusion | appendix | skip
+    part: str | None = None
+    sections: list[tuple[str, int]] = field(default_factory=list)
 
 
-def _outline_chapters(reader: PdfReader) -> list[tuple[str, int]]:
-    found: list[tuple[str, int]] = []
+PART_RE = re.compile(r"^\s*(第\s*[0-9一二三四五六七八九十]+\s*(部分|部|篇|编)|part\s+([0-9]+|[ivxlc]+)\b)", re.I)
+KIND_RULES = [  # checked in order against a non-chapter title
+    ("skip", re.compile(r"目录|contents|致谢|鸣谢|acknowledg|注释|注解|^notes?\b|参考文献|references|bibliography|索引|^index|版权|copyright|作者简介|about the author", re.I)),
+    ("appendix", re.compile(r"附录|appendix", re.I)),
+    ("conclusion", re.compile(r"结语|结论|后记|尾声|epilogue|conclusion|afterword", re.I)),
+    ("front", re.compile(r"序|前言|引言|导言|导论|preface|foreword|prologue|introduction", re.I)),
+]
+MAP_BY_DEFAULT = {"body", "front", "conclusion"}  # appendix: on request; skip: never
+
+
+def _is_chapter(title: str) -> bool:
+    return bool(CHAPTER_RE.match(title) or re.match(r"^\d+\s", title))
+
+
+def _outline(reader: PdfReader) -> list[tuple[int, str, int]]:
+    """(depth, title, 1-based page) for every outline entry with a resolvable page."""
+    found: list[tuple[int, str, int]] = []
     def walk(items, depth):
         for it in items:
             if isinstance(it, list):
                 walk(it, depth + 1)
                 continue
             try:
-                page = reader.get_destination_page_number(it) + 1
+                found.append((depth, it.title.strip(), reader.get_destination_page_number(it) + 1))
             except Exception:
                 continue
-            if depth <= 1:
-                found.append((it.title.strip(), page))
-    walk(reader.outline or [], 0)
-    chap = [(t, p) for t, p in found if CHAPTER_RE.match(t) or re.match(r"^\d+\s", t)]
-    return chap or [(t, p) for t, p in found if p > 1]
+    try:
+        walk(reader.outline or [], 0)
+    except Exception:
+        return []
+    return found
+
+
+def _classify(title: str, before_first_chapter: bool) -> str:
+    for kind, rx in KIND_RULES:
+        if rx.search(title):
+            return "front" if kind == "front" and not before_first_chapter else kind
+    return "front" if before_first_chapter else "conclusion"
+
+
+def _outline_chapters(reader: PdfReader) -> list[tuple[str, int]]:
+    """Kept for callers of the old API: chapter-like outline titles with pages."""
+    return [(t, p) for d, t, p in _outline(reader) if d <= 1 and _is_chapter(t)]
 
 
 def _pattern_chapters(pages: list[str]) -> list[tuple[str, int]]:
@@ -55,6 +88,7 @@ _CJK = r"\u3000-\u303f\u3400-\u9fff\uff00-\uffef"
 
 def normalize_text(text: str) -> str:
     """pypdf breaks CJK lines after almost every token ("2001\n年\n12\n月"); rejoin them."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(rf"(?<=[{_CJK}])[ \t]*\n[ \t]*|[ \t]*\n[ \t]*(?=[{_CJK}])", "", text)
     return re.sub(r"[ \t]*\n[ \t]*", " ", text) if re.search(rf"[{_CJK}]", text) else text
 
@@ -75,17 +109,50 @@ def _fix_starts(marks: list[tuple[str, int]], pages: list[str]) -> list[tuple[st
     return fixed
 
 
+def detect_structure(reader: PdfReader | None, pages: list[str]) -> list[Chapter]:
+    """Chapters plus the book's other parts (preface, conclusion, appendices, back matter), each with a kind,
+    the part it belongs to and its section headings, from the outline when there is one."""
+    n = len(pages)
+    entries = _outline(reader) if reader is not None else []
+    chapter_entries = [e for e in entries if e[0] <= 1 and _is_chapter(e[1])]
+    if not chapter_entries:
+        marks = _pattern_chapters(pages)
+        if not marks:
+            return [Chapter("Full text", 1, n)]
+        chapter_entries = [(0, t, p) for t, p in marks]
+        entries = chapter_entries
+    depth = min(d for d, _, _ in chapter_entries)
+    first_ch = min(p for _, _, p in chapter_entries)
+    segs: list[tuple[str, int, str]] = []  # (title, page, kind)
+    parts: list[tuple[str, int]] = []
+    for d, t, p in entries:
+        if d > depth:
+            continue
+        if _is_chapter(t):
+            segs.append((t, p, "body"))
+        elif PART_RE.match(t):
+            parts.append((t, p))
+        elif d == depth or d == 0:
+            segs.append((t, p, _classify(t, p < first_ch)))
+    segs.sort(key=lambda x: x[1])
+    fixed = _fix_starts([(t, p) for t, p, _ in segs], pages)
+    segs = sorted(((t, p, k) for (t, p), (_, _, k) in zip(fixed, segs)), key=lambda x: x[1])
+    out: list[Chapter] = []
+    for i, (t, start, kind) in enumerate(segs):
+        end = segs[i + 1][1] - 1 if i + 1 < len(segs) else n
+        part = next((pt for pt, pp in reversed(parts) if pp <= start), None)
+        out.append(Chapter(t, start, max(start, min(end, n)), kind, part if kind == "body" else None))
+    for d, t, p in entries:  # sections: outline entries one level below the chapters
+        if d == depth + 1:
+            for ch in out:
+                if ch.page_start <= p <= ch.page_end:
+                    ch.sections.append((t, p))
+                    break
+    return out
+
+
 def detect_chapters(reader: PdfReader, pages: list[str]) -> list[Chapter]:
-    marks = _outline_chapters(reader) or _pattern_chapters(pages)
-    if not marks:
-        return [Chapter("Full text", 1, len(pages))]
-    marks.sort(key=lambda x: x[1])
-    marks = sorted(_fix_starts(marks, pages), key=lambda x: x[1])
-    chapters = []
-    for idx, (title, start) in enumerate(marks):
-        end = marks[idx + 1][1] - 1 if idx + 1 < len(marks) else len(pages)
-        chapters.append(Chapter(title, start, max(start, end)))
-    return chapters
+    return detect_structure(reader, pages)
 
 
 def chunk_page(text: str, max_chars: int = 1200) -> list[str]:
@@ -102,26 +169,99 @@ def chunk_page(text: str, max_chars: int = 1200) -> list[str]:
     return chunks
 
 
-def ingest_pdf(con: sqlite3.Connection, path: str, title: str | None = None, domain: str = "general",
-               license: str | None = None) -> int:
-    reader = PdfReader(path)
-    pages = [(p.extract_text() or "") for p in reader.pages]
-    cur = con.execute("INSERT INTO books(title, source_path, domain, license) VALUES (?,?,?,?)",
-                      (title or Path(path).stem, path, domain, license))
-    book_id = cur.lastrowid
-    for ord_, ch in enumerate(detect_chapters(reader, pages)):
+def extract_pages(path: str, ocr: bool = True, progress=None) -> list[tuple[str, str]]:
+    """Text of every page as (text, method). Born-digital pages use pdfium's text layer (fast, no OCR);
+    a page with almost no text but real content is OCR'd with RapidOCR when it is installed."""
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(path)
+    out: list[tuple[str, str]] = []
+    engine = None
+    try:
+        for i in range(len(pdf)):
+            page = pdf[i]
+            tp = page.get_textpage()
+            text = tp.get_text_range()
+            tp.close()
+            method = "text"
+            if ocr and len(re.sub(r"\s", "", text)) < 15 and _has_image(page, pdfium):
+                engine = engine or _ocr_engine()
+                if engine is not None:
+                    import numpy as np
+                    res = engine(np.array(page.render(scale=2).to_pil().convert("RGB")))
+                    ocr_text = "\n".join(res.txts or []) if res is not None else ""
+                    if len(ocr_text.strip()) > len(text.strip()):
+                        text, method = ocr_text, "ocr"
+            page.close()
+            out.append((text.replace("\r\n", "\n"), method))
+            if progress:
+                progress(i + 1, len(pdf))
+    finally:
+        pdf.close()
+    return out
+
+
+_OCR = None
+
+
+def _has_image(page, pdfium) -> bool:
+    """Only pages that carry an image can hold scanned text; blank pages skip OCR."""
+    try:
+        return next(page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE], max_depth=2), None) is not None
+    except Exception:
+        return True
+
+
+def _ocr_engine():
+    global _OCR
+    if _OCR is None:
+        try:
+            import logging
+            from rapidocr import RapidOCR
+            _OCR = RapidOCR()
+            logging.getLogger("RapidOCR").setLevel(logging.ERROR)
+        except Exception:
+            _OCR = False
+    return _OCR or None
+
+
+def write_chapters(con: sqlite3.Connection, book_id: int, chapters: list[Chapter], texts: list[str]) -> None:
+    """Chapter rows plus page-tagged chunks (with section titles) for the full-text index."""
+    for ord_, ch in enumerate(chapters):
         ch_id = con.execute(
-            "INSERT INTO chapters(book_id, ord, title, page_start, page_end) VALUES (?,?,?,?,?)",
-            (book_id, ord_, ch.title, ch.page_start, ch.page_end)).lastrowid
+            "INSERT INTO chapters(book_id, ord, title, page_start, page_end, kind, part, map_status) VALUES (?,?,?,?,?,?,?,?)",
+            (book_id, ord_, ch.title, ch.page_start, ch.page_end, ch.kind, ch.part,
+             "pending" if ch.kind in MAP_BY_DEFAULT else "not_planned")).lastrowid
         n = 0
         for page_no in range(ch.page_start, ch.page_end + 1):
-            for piece in chunk_page(normalize_text(pages[page_no - 1])):
+            section = next((t for t, p in reversed(ch.sections) if p <= page_no), None)
+            for piece in chunk_page(normalize_text(texts[page_no - 1])):
+                h = hashlib.sha1(piece.encode("utf-8")).hexdigest()
                 cid = con.execute(
-                    "INSERT INTO chunks(book_id, chapter_id, page, ord, text) VALUES (?,?,?,?,?)",
-                    (book_id, ch_id, page_no, n, piece)).lastrowid
+                    "INSERT INTO chunks(book_id, chapter_id, page, ord, text, section, content_hash) VALUES (?,?,?,?,?,?,?)",
+                    (book_id, ch_id, page_no, n, piece, section, h)).lastrowid
                 con.execute("INSERT INTO chunks_fts(rowid, text) VALUES (?,?)", (cid, piece))
                 n += 1
     con.commit()
+
+
+def write_book(con: sqlite3.Connection, book_id: int, reader: PdfReader | None, pages: list[tuple[str, str]]) -> list[Chapter]:
+    """Pages, chapters and page-tagged chunks for an already created book row."""
+    texts = [t for t, _ in pages]
+    con.executemany("INSERT OR REPLACE INTO pages(book_id, page, text, method) VALUES (?,?,?,?)",
+                    [(book_id, i + 1, t, m) for i, (t, m) in enumerate(pages)])
+    con.execute("UPDATE books SET page_count=? WHERE id=?", (len(pages), book_id))
+    chapters = detect_structure(reader, texts)
+    write_chapters(con, book_id, chapters, texts)
+    return chapters
+
+
+def ingest_pdf(con: sqlite3.Connection, path: str, title: str | None = None, domain: str = "general",
+               license: str | None = None) -> int:
+    """Synchronous import (scripts and tests). The web app runs the same steps as a background job."""
+    reader = PdfReader(path)
+    book_id = con.execute("INSERT INTO books(title, source_path, domain, license) VALUES (?,?,?,?)",
+                          (title or Path(path).stem, path, domain, license)).lastrowid
+    write_book(con, book_id, reader, extract_pages(path))
     return book_id
 
 

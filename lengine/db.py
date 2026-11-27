@@ -116,7 +116,39 @@ def _m1_book_metadata_and_chapter_scoped_keys(con) -> None:
     con.execute("CREATE INDEX IF NOT EXISTS idx_books_sha ON books(file_sha256)")
 
 
-MIGRATIONS = [_m1_book_metadata_and_chapter_scoped_keys]
+def _m2_processing_pipeline(con) -> None:
+    """Background processing: one job per imported book, 12 stages with their own status, page texts kept
+    (so extraction/OCR never repeats), per-chapter map status for resumable parallel extraction, and a
+    response cache so a retried or re-imported chapter does not pay twice."""
+    _script(con, """
+    CREATE TABLE IF NOT EXISTS jobs (
+      id INTEGER PRIMARY KEY, book_id INTEGER, kind TEXT NOT NULL DEFAULT 'ingest', status TEXT NOT NULL DEFAULT 'queued',
+      stage TEXT, error TEXT, options TEXT DEFAULT '{}', report TEXT DEFAULT '{}', estimate_usd REAL,
+      created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), finished_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS job_stages (
+      job_id INTEGER NOT NULL, stage TEXT NOT NULL, ord INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+      done INTEGER DEFAULT 0, total INTEGER DEFAULT 0, note TEXT, error TEXT, started_at TEXT, finished_at TEXT,
+      PRIMARY KEY (job_id, stage)
+    );
+    CREATE TABLE IF NOT EXISTS pages (
+      book_id INTEGER NOT NULL, page INTEGER NOT NULL, text TEXT NOT NULL, method TEXT NOT NULL DEFAULT 'text',
+      PRIMARY KEY (book_id, page)
+    );
+    CREATE TABLE IF NOT EXISTS llm_cache (
+      key TEXT PRIMARY KEY, purpose TEXT, response TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_jobs_book ON jobs(book_id)
+    """)
+    for col, decl in [("map_status", "TEXT"), ("map_error", "TEXT"), ("map_attempts", "INTEGER DEFAULT 0"),
+                      ("part", "TEXT")]:
+        _add_column(con, "chapters", col, decl)
+    for col, decl in [("section", "TEXT"), ("content_hash", "TEXT")]:
+        _add_column(con, "chunks", col, decl)
+    con.execute("UPDATE chapters SET map_status='done' WHERE map_built_at IS NOT NULL AND map_status IS NULL")
+
+
+MIGRATIONS = [_m1_book_metadata_and_chapter_scoped_keys, _m2_processing_pipeline]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

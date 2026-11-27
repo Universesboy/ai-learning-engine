@@ -36,8 +36,26 @@ export interface BookSummary {
   id: number; title: string; author: string | null; category: string | null; domain: string; created_at: string
   page_count: number | null; chapters: number; chapters_mapped: number; concepts: number; mastered: number; started: number
   weak: number; due: number; progress: number; ai_status: 'done' | 'partial' | 'not_started'; last_studied: string | null
-  needs_repair: number
+  needs_repair: number; status?: string | null; job: JobBrief | null
 }
+export type JobStatus = 'queued' | 'running' | 'waiting' | 'done' | 'partial' | 'failed'
+export interface JobBrief {
+  id: number; book_id: number; status: JobStatus; stage: string; stage_label: string; estimate_usd: number | null
+  error: string | null; chapters_done: number; chapters_total: number
+}
+export interface JobStage {
+  stage: string; label: string; status: 'pending' | 'running' | 'waiting' | 'done' | 'failed' | 'skipped'
+  done: number | null; total: number | null; note: string | null; error: string | null
+}
+export interface JobChapter { id: number; title: string; kind: string; map_status: string; map_error: string | null; page_start: number; page_end: number }
+export interface Job {
+  id: number; book_id: number; status: JobStatus; stage: string; error: string | null; estimate_usd: number | null
+  created_at: string; finished_at: string | null; progress: number; concepts: number; chapters_total: number; chapters_done: number
+  chapters_failed: JobChapter[]; chapters: JobChapter[]; stages: JobStage[]
+  report: { issues?: { level: 'info' | 'warn' | 'error'; text: string; items?: string[][] }[]; ocr_pages?: number; pages?: number }
+}
+export const JOB_ACTIVE: JobStatus[] = ['queued', 'running']
+export const KIND_LABEL: Record<string, string> = { body: '正文', front: '前言', conclusion: '结语', appendix: '附录', skip: '致谢、索引等' }
 export interface Concept {
   id: number; book_id: number; chapter_id: number; name: string; kind: string; form: string; pages: number[]
   summary: string; status: Status; mastery: number; can_apply: boolean; due: string | null; forgetting_risk: number | null

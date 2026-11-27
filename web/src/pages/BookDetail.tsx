@@ -1,12 +1,14 @@
-import { useMemo, useRef, useState } from 'react'
+import { Fragment, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { BookSummary, Concept, ERR_LABEL, LEVEL_LABEL, STATUS_LABEL, STATUS_ORDER, Status, domainLabel, fmtDate, patch, post, pct } from '../api'
+import { BookSummary, Concept, ERR_LABEL, KIND_LABEL, LEVEL_LABEL, STATUS_LABEL, STATUS_ORDER, Status, domainLabel, fmtDate, patch, post, pct } from '../api'
 import { useApi } from '../hooks'
 import { Cover, Dot, ErrorBox, Legend, Pill, RepairBanner, Skeleton, StatusMeter } from '../components/ui'
+import { JobPanel } from '../components/JobPanel'
 
 interface Chapter {
   id: number; ord: number; title: string; page_start: number; page_end: number; concepts: number; mastered: number
   started: number; weak: number; due: number; needs_repair: boolean; map_built_at: string | null; summary: string | null
+  kind: string | null; part: string | null; map_status: string | null; map_error: string | null
 }
 interface Detail {
   book: { id: number; title: string; author: string | null; category: string | null; domain: string; created_at: string; license: string | null }
@@ -61,16 +63,20 @@ function ChapterCard({ ch, concepts, onMapped }: { ch: Chapter; concepts: Concep
       <div className="chapter-head" onClick={() => concepts.length && setOpen(!open)} role={concepts.length ? 'button' : undefined}
         tabIndex={concepts.length ? 0 : undefined} aria-expanded={concepts.length ? open : undefined}
         onKeyDown={e => { if (e.key === 'Enter' && concepts.length) setOpen(!open) }}>
-        <h3>{ch.title}</h3>
+        <h3>{ch.title}{ch.kind && ch.kind !== 'body' && <span className="pill" style={{ marginLeft: 8, verticalAlign: 2 }}>{KIND_LABEL[ch.kind] ?? ch.kind}</span>}</h3>
         {concepts.length > 0 && <div className="chapter-dots" aria-hidden="true">{concepts.map(c => <Dot key={c.id} status={c.status} />)}</div>}
         <span className="faint num" style={{ minWidth: 92, textAlign: 'right' }}>p.{ch.page_start}–{ch.page_end}</span>
       </div>
       <div className="row faint" style={{ marginTop: 6 }}>
         {ch.concepts ? <span>{ch.mastered} / {ch.concepts} 已掌握{ch.weak ? `，${ch.weak} 个薄弱` : ''}{ch.due ? `，${ch.due} 个待复习` : ''}</span>
-          : <span>还没有建立知识地图</span>}
+          : <span className={ch.map_status === 'failed' ? 'error' : undefined}>{
+            ch.map_status === 'running' ? '正在整理本章……'
+              : ch.map_status === 'failed' ? `整理失败：${ch.map_error ?? '未知错误'}`
+                : ch.map_status === 'not_planned' ? '默认不整理，需要时可以单独整理'
+                  : ch.map_built_at ? '本章没有提取到知识点' : '还没有建立知识地图'}</span>}
         {ch.needs_repair && <span className="pill st-shaky">需要修复</span>}
         <span className="spacer" />
-        {!ch.concepts && <button className="btn small" disabled={busy} onClick={build}>{busy ? '正在阅读本章……' : '建立知识地图'}</button>}
+        {!ch.concepts && ch.map_status !== 'running' && <button className="btn small" disabled={busy} onClick={build}>{busy ? '正在阅读本章……' : ch.map_status === 'failed' ? '重新整理' : '建立知识地图'}</button>}
       </div>
       {err && <p className="error" style={{ fontSize: 13, marginTop: 6 }}>{err}</p>}
       {open && (
@@ -160,13 +166,20 @@ export default function BookDetail() {
         </div>
       </section>
 
+      <JobPanel bookId={d.book.id} onChange={reload} />
+
       <div className="tabs" role="tablist">
         {TABS.map(t => <button key={t} role="tab" className="tab" aria-selected={tab === t} onClick={() => setTab(t)}>{t}</button>)}
       </div>
 
       {tab === '章节结构' && (
         <div className="chapters">
-          {d.chapters.map(ch => <ChapterCard key={ch.id} ch={ch} concepts={byChapter(ch.id)} onMapped={reload} />)}
+          {d.chapters.map((ch, i) => (
+            <Fragment key={ch.id}>
+              {ch.part && ch.part !== d.chapters[i - 1]?.part && <h3 className="part-title">{ch.part}</h3>}
+              <ChapterCard ch={ch} concepts={byChapter(ch.id)} onMapped={reload} />
+            </Fragment>
+          ))}
         </div>
       )}
       {tab === '知识点' && <ConceptTable concepts={d.concepts} chapters={d.chapters} />}

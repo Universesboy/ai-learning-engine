@@ -86,7 +86,10 @@ def _book_summary(b: dict, concepts: list[dict], chapters: list[dict], due_cut: 
     total = len(concepts)
     mastered = sum(c["status"] == "mastered" for c in concepts)
     started = sum(c["status"] != "not_started" for c in concepts)
-    mapped = sum(1 for ch in chapters if ch.get("map_built_at"))
+    # front matter, appendices and acknowledgements that are not planned for mapping don't count as "unfinished"
+    planned = [ch for ch in chapters if ch.get("map_status") != "not_planned" or ch.get("map_built_at")]
+    mapped = sum(1 for ch in planned if ch.get("map_built_at"))
+    chapters = planned
     return {
         **{k: b.get(k) for k in ("id", "title", "author", "category", "domain", "created_at", "page_count", "status")},
         "chapters": len(chapters), "chapters_mapped": mapped, "concepts": total, "mastered": mastered,
@@ -97,12 +100,22 @@ def _book_summary(b: dict, concepts: list[dict], chapters: list[dict], due_cut: 
     }
 
 
+def _job_brief(con, job: dict) -> dict:
+    from .pipeline import STAGES
+    k = con.execute("SELECT done, total FROM job_stages WHERE job_id=? AND stage='knowledge'", (job["id"],)).fetchone()
+    return {**job, "stage_label": dict(STAGES).get(job["stage"], job["stage"]),
+            "chapters_done": k["done"] if k else 0, "chapters_total": k["total"] if k else 0}
+
+
 def library(con: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(timezone.utc)
     due_cut = _end_of_today(now).isoformat()
     books = rows(con.execute("SELECT * FROM books ORDER BY id DESC"))
     concepts = _concepts(con, None, now)
-    chapters = rows(con.execute("SELECT id, book_id, map_built_at FROM chapters"))
+    chapters = rows(con.execute("SELECT id, book_id, map_built_at, map_status FROM chapters"))
+    jobs = {r["book_id"]: r for r in rows(con.execute(
+        "SELECT j.id, j.book_id, j.status, j.stage, j.estimate_usd, j.error FROM jobs j "
+        "WHERE j.id IN (SELECT max(id) FROM jobs GROUP BY book_id)"))}
     last = {r["book_id"]: r["last"] for r in con.execute(
         "SELECT c.book_id, max(a.created_at) last FROM attempts a JOIN concepts c ON c.id=a.concept_id GROUP BY c.book_id")}
     repair = defaultdict(int)
@@ -115,6 +128,7 @@ def library(con: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
                           [ch for ch in chapters if ch["book_id"] == b["id"]], due_cut)
         s["last_studied"] = last.get(b["id"])
         s["needs_repair"] = repair.get(b["id"], 0)
+        s["job"] = _job_brief(con, jobs[b["id"]]) if b["id"] in jobs else None
         out.append(s)
     return out
 

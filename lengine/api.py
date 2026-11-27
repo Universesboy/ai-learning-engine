@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile
@@ -13,12 +14,20 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import dashboard, db, ingest, knowledge, maintenance, practice, teacher, visuals
+from . import dashboard, db, ingest, knowledge, maintenance, pipeline, practice, teacher, visuals
 from .llm import cost_usd, make_llm
 
 DATA = Path(os.environ.get("ENGINE_DATA", "data"))
 con = db.ThreadLocalConnection(DATA / "engine.db")
-app = FastAPI(title="AI Learning Engine")
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    runner.start()  # also resumes a job that a restart interrupted
+    yield
+
+
+app = FastAPI(title="AI Learning Engine", lifespan=lifespan)
 STATIC = Path(__file__).parent / "static"
 DIST = STATIC / "dist"
 app.add_middleware(GZipMiddleware, minimum_size=1000)
@@ -47,12 +56,29 @@ def llm():
     return _llm
 
 
+def _pipeline_llm():
+    """Model for background jobs; a missing key fails the stage with a readable message."""
+    global _llm
+    if _llm is None:
+        _llm = make_llm(con)
+    return _llm
+
+
+runner = pipeline.Runner(con, _pipeline_llm)
+
+
+
+
 class Reply(BaseModel):
     message: str
 
 
 class Answer(BaseModel):
     response: str
+
+
+class Confirm(BaseModel):
+    chapter_ids: list[int] | None = None
 
 
 class BookEdit(BaseModel):
@@ -93,22 +119,81 @@ def library():
 
 @app.post("/api/books")
 async def upload(file: UploadFile, title: str | None = None, domain: str = "general", license: str | None = None,
-                 author: str | None = None, category: str | None = None):
+                 author: str | None = None, category: str | None = None, auto_map: bool = False):
+    """Saves the file and returns at once; validation, extraction and structure run as a background job."""
     dest = DATA / "books" / Path(file.filename).name
     dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
     h = hashlib.sha256()
-    with dest.open("wb") as f:
-        while chunk := file.file.read(1 << 20):
+    with tmp.open("wb") as f:
+        while chunk := await file.read(1 << 20):
             h.update(chunk)
             f.write(chunk)
     sha = h.hexdigest()
     dup = con.execute("SELECT id FROM books WHERE file_sha256=?", (sha,)).fetchone()
     if dup:  # same file already imported: don't process (or pay for) it twice
-        return {"book_id": dup["id"], "duplicate": True}
-    book_id = ingest.ingest_pdf(con, str(dest), title, domain, license)
-    con.execute("UPDATE books SET file_sha256=?, author=?, category=? WHERE id=?", (sha, author, category, book_id))
+        tmp.unlink(missing_ok=True)
+        job = con.execute("SELECT id FROM jobs WHERE book_id=? ORDER BY id DESC LIMIT 1", (dup["id"],)).fetchone()
+        return {"book_id": dup["id"], "job_id": job["id"] if job else None, "duplicate": True}
+    if dest.exists():  # a different file with the same name: keep both
+        dest = dest.with_name(f"{dest.stem}-{sha[:8]}{dest.suffix}")
+    tmp.replace(dest)
+    book_id = con.execute(
+        "INSERT INTO books(title, source_path, domain, license, file_sha256, author, category, status) VALUES (?,?,?,?,?,?,?,?)",
+        (title or dest.stem, str(dest), domain, license, sha, author, category, "processing")).lastrowid
     con.commit()
-    return {"book_id": book_id, "duplicate": False}
+    runner.start()
+    job_id = runner.create_job(book_id, {"auto_map": auto_map})
+    return {"book_id": book_id, "job_id": job_id, "duplicate": False}
+
+
+def _job_or_404(job_id: int) -> dict:
+    if not con.execute("SELECT 1 FROM jobs WHERE id=?", (job_id,)).fetchone():
+        raise HTTPException(404, "job not found")
+    return pipeline.job_view(con, job_id)
+
+
+@app.get("/api/jobs")
+def jobs(active: bool = True):
+    """Latest job of each book; with active=1 only those still needing attention (running, waiting, failed)."""
+    ids = [r[0] for r in con.execute("SELECT max(id) FROM jobs GROUP BY book_id")]
+    out = [pipeline.job_view(con, i) for i in ids]
+    if active:
+        out = [x for x in out if x["status"] in ("queued", "running", "waiting", "failed")]
+    return out
+
+
+@app.get("/api/jobs/{job_id}")
+def job(job_id: int):
+    return _job_or_404(job_id)
+
+
+@app.get("/api/books/{book_id}/job")
+def book_job(book_id: int):
+    r = con.execute("SELECT id FROM jobs WHERE book_id=? ORDER BY id DESC LIMIT 1", (book_id,)).fetchone()
+    return pipeline.job_view(con, r["id"]) if r else None
+
+
+@app.get("/api/books/{book_id}/estimate")
+def estimate(book_id: int, chapter_ids: str | None = None):
+    ids = [int(x) for x in chapter_ids.split(",") if x] if chapter_ids else None
+    return pipeline.estimate_map_cost(con, book_id, ids)
+
+
+@app.post("/api/jobs/{job_id}/confirm")
+def confirm(job_id: int, body: Confirm | None = None):
+    _job_or_404(job_id)
+    runner.start()
+    runner.confirm_map(job_id, body.chapter_ids if body else None)
+    return pipeline.job_view(con, job_id)
+
+
+@app.post("/api/jobs/{job_id}/retry")
+def retry(job_id: int):
+    _job_or_404(job_id)
+    runner.start()
+    runner.retry(job_id)
+    return pipeline.job_view(con, job_id)
 
 
 def _book_or_404(book_id: int) -> None:

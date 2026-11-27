@@ -1,10 +1,15 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { api, BookSummary, DOMAINS, domainLabel, fmtDate } from '../api'
 import { useApi } from '../hooks'
 import { Cover, ErrorBox, Icon, RepairBanner, Skeleton, StatusMeter, Toast } from '../components/ui'
 
 function AiState({ b }: { b: BookSummary }) {
+  const j = b.job
+  if (j && (j.status === 'queued' || j.status === 'running')) return <span className="ai-state"><span className="dot st-cannot_apply_yet pulse" />
+    {j.stage === 'knowledge' ? `正在整理 ${j.chapters_done} / ${j.chapters_total} 章` : `正在处理：${j.stage_label}`}</span>
+  if (j?.status === 'waiting') return <span className="ai-state"><span className="dot st-shaky" />结构已识别，等你确认整理（约 ${(j.estimate_usd ?? 0).toFixed(2)}）</span>
+  if (j?.status === 'failed') return <span className="ai-state error"><span className="dot st-needs_relearning" />处理中断，打开查看</span>
   if (b.needs_repair) return <span className="ai-state"><span className="dot st-shaky" />{b.needs_repair} 章需要修复</span>
   if (b.ai_status === 'done') return <span className="ai-state"><span className="dot st-mastered" />AI 已整理全部 {b.chapters} 章</span>
   if (b.ai_status === 'partial') return <span className="ai-state"><span className="dot st-cannot_apply_yet" />已整理 {b.chapters_mapped} / {b.chapters} 章</span>
@@ -20,7 +25,7 @@ function Upload({ onDone }: { onDone: (id: number, dup: boolean) => void }) {
   const send = async (f?: File) => {
     if (!f) return
     if (!/\.pdf$/i.test(f.name)) { setErr('目前只支持 PDF 文件'); return }
-    setErr(null); setBusy(`正在导入「${f.name}」，识别章节和页码……`)
+    setErr(null); setBusy(`正在上传「${f.name}」……`)
     const fd = new FormData(); fd.append('file', f)
     try {
       const r = await api<{ book_id: number; duplicate: boolean }>(
@@ -35,7 +40,7 @@ function Upload({ onDone }: { onDone: (id: number, dup: boolean) => void }) {
       onDrop={e => { e.preventDefault(); setOver(false); send(e.dataTransfer.files[0]) }}
     >
       <h3>导入书籍</h3>
-      <p className="faint">把 PDF 拖到这里，或选择文件。同一个文件不会重复导入。</p>
+      <p className="faint">把 PDF 拖到这里，或选择文件。上传后在后台识别章节，整理知识点前会先告诉你预计花费。同一个文件不会重复导入。</p>
       <select className="select" value={domain} onChange={e => setDomain(e.target.value)} aria-label="领域">
         {DOMAINS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
       </select>
@@ -51,6 +56,12 @@ export default function Library() {
   const { data, error, reload } = useApi<BookSummary[]>('/library')
   const [toast, setToast] = useState<string | null>(null)
   const nav = useNavigate()
+  const active = data?.some(b => b.job && (b.job.status === 'queued' || b.job.status === 'running'))
+  useEffect(() => {
+    if (!active) return
+    const t = setInterval(reload, 3000)
+    return () => clearInterval(t)
+  }, [active, reload])
   if (error) return <ErrorBox message={error} retry={reload} />
   return (
     <div className="fade-in">
