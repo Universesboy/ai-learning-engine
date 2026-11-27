@@ -5,6 +5,7 @@ commercially. Chapters come from the PDF outline when it has one, else from head
 """
 from __future__ import annotations
 
+from pathlib import Path
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -106,7 +107,7 @@ def ingest_pdf(con: sqlite3.Connection, path: str, title: str | None = None, dom
     reader = PdfReader(path)
     pages = [(p.extract_text() or "") for p in reader.pages]
     cur = con.execute("INSERT INTO books(title, source_path, domain, license) VALUES (?,?,?,?)",
-                      (title or path.rsplit("/", 1)[-1], path, domain, license))
+                      (title or Path(path).stem, path, domain, license))
     book_id = cur.lastrowid
     for ord_, ch in enumerate(detect_chapters(reader, pages)):
         ch_id = con.execute(
