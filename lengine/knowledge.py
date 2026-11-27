@@ -65,26 +65,67 @@ def validate(data: dict, page_start: int, page_end: int) -> list[dict]:
     return clean
 
 
+def _has_history(con, concept_id: int) -> bool:
+    return any(con.execute(sql, (concept_id,)).fetchone() for sql in (
+        "SELECT 1 FROM attempts WHERE concept_id=? LIMIT 1", "SELECT 1 FROM cards WHERE concept_id=?",
+        "SELECT 1 FROM sessions WHERE concept_id=? LIMIT 1", "SELECT 1 FROM artifacts WHERE concept_id=? LIMIT 1"))
+
+
 def build_chapter_map(con: sqlite3.Connection, llm: LLM, chapter_id: int, lang: str = "Chinese") -> list[dict]:
+    """Build (or rebuild) one chapter's map.
+
+    Rebuilding never loses learning history: an old concept with attempts, a review card, a lesson or a
+    visual is kept (and reused when the new map has a concept of the same name); old concepts without
+    history are replaced by the new map.
+    """
     ch = dict(con.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone())
     text = _numbered(ingest.chapter_text(con, chapter_id))
     data = complete_json(llm, SYSTEM.replace("{lang}", lang),
                          f"Chapter: {ch['title']} (pages {ch['page_start']}-{ch['page_end']})\n\n{text}",
-                         purpose="knowledge")
+                         purpose="knowledge", book_id=ch["book_id"])
     concepts = validate(data, ch["page_start"], ch["page_end"])
+    old = rows(con.execute("SELECT id, key, name FROM concepts WHERE chapter_id=?", (chapter_id,)))
+    keep = {o["id"]: o for o in old if _has_history(con, o["id"])}
+    new_keys = {c["key"] for c in concepts}
+    # prerequisites never cross chapters at this stage; edges that do came from the old key collision bug
+    con.execute("DELETE FROM prerequisites WHERE concept_id IN (SELECT id FROM concepts WHERE chapter_id=?) "
+                "OR requires_id IN (SELECT id FROM concepts WHERE chapter_id=?)", (chapter_id, chapter_id))
+    for o in old:
+        if o["id"] in keep:
+            continue
+        con.execute("DELETE FROM questions WHERE concept_id=?", (o["id"],))
+        con.execute("DELETE FROM concepts WHERE id=?", (o["id"],))
+    by_name = {o["name"]: o for o in keep.values()}
+    for c in concepts:  # reuse a kept concept of the same name so its history stays attached
+        o = by_name.get(c["name"])
+        if o and o["key"] != c["key"] and o["key"] not in new_keys:
+            con.execute("UPDATE concepts SET key=? WHERE id=?", (c["key"], o["id"]))
     ids = {}
     for c in concepts:
         cur = con.execute(
             "INSERT INTO concepts(book_id, chapter_id, key, name, kind, form, summary, formulas, examples, confusions, pages)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(book_id,key) DO UPDATE SET summary=excluded.summary RETURNING id",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chapter_id,key) DO UPDATE SET name=excluded.name, kind=excluded.kind,"
+            " form=excluded.form, summary=excluded.summary, formulas=excluded.formulas, examples=excluded.examples,"
+            " confusions=excluded.confusions, pages=excluded.pages RETURNING id",
             (ch["book_id"], chapter_id, c["key"], c["name"], c["kind"], c["form"], c.get("summary", ""),
              j(c.get("formulas", [])), j(c.get("examples", [])), j(c.get("confusions", [])), j(c["pages"])))
         ids[c["key"]] = cur.fetchone()[0]
     for c in concepts:
         for r in c["requires"]:
             con.execute("INSERT OR IGNORE INTO prerequisites VALUES (?,?)", (ids[c["key"]], ids[r]))
+    con.execute("UPDATE chapters SET map_built_at=datetime('now') WHERE id=?", (chapter_id,))
     con.commit()
     return concepts
+
+
+def chapters_needing_repair(con: sqlite3.Connection, book_id: int | None = None) -> list[dict]:
+    """Chapters damaged by the pre-2.0 key collision: a concept of one chapter was merged into another
+    chapter's concept with the same key, which shows up as prerequisites that cross chapters."""
+    sql = ("SELECT DISTINCT ch.id, ch.book_id, ch.ord, ch.title FROM prerequisites p "
+           "JOIN concepts a ON a.id=p.concept_id JOIN concepts b ON b.id=p.requires_id "
+           "JOIN chapters ch ON ch.id IN (a.chapter_id, b.chapter_id) WHERE a.chapter_id != b.chapter_id")
+    out = rows(con.execute(sql))
+    return sorted((c for c in out if book_id is None or c["book_id"] == book_id), key=lambda c: (c["book_id"], c["ord"]))
 
 
 def learning_path(con: sqlite3.Connection, book_id: int, chapter_id: int | None = None) -> list[dict]:

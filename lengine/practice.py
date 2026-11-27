@@ -39,7 +39,7 @@ def generate_questions(con: sqlite3.Connection, llm: LLM, concept_id: int, n: in
     excerpts = "\n".join(f"[p.{h['page']}] {h['text']}" for h in hits)
     user = (f"Concept: {c['name']}\nSummary: {c['summary']}\nMisconceptions: {c['confusions']}\n"
             f"Formulas: {c['formulas']}\n\nExcerpts:\n{excerpts}")
-    data = complete_json(llm, GEN_SYSTEM.replace("{n}", str(n)).replace("{lang}", lang), user, purpose="practice")
+    data = complete_json(llm, GEN_SYSTEM.replace("{n}", str(n)).replace("{lang}", lang), user, purpose="practice", book_id=c["book_id"])
     out = []
     for q in data.get("questions", []):
         if not q.get("prompt") or q.get("level") not in ("recall", "understand", "apply"):
@@ -80,7 +80,8 @@ def grade(con: sqlite3.Connection, llm: LLM | None, question_id: int, response: 
             raise RuntimeError("open answers need a model to grade")
         result = complete_json(llm, GRADE_SYSTEM,
                                f"Question: {q['prompt']}\nModel answer: {q['answer']}\nRubric: {q['rubric']}\n"
-                               f"Learner answer: {response}", purpose="grading")
+                               f"Learner answer: {response}", purpose="grading",
+                               book_id=_book_of(con, q["concept_id"]))
         result["score"] = max(0.0, min(1.0, float(result.get("score", 0))))
         if result.get("error_type") not in ERROR_TYPES:
             result["error_type"] = "incomplete" if result["score"] < 1 else "none"
@@ -90,6 +91,11 @@ def grade(con: sqlite3.Connection, llm: LLM | None, question_id: int, response: 
     sched = review.review(con, q["concept_id"], kind, result["score"])
     con.commit()
     return {**result, "next_review": sched["due"], "status": concept_progress(con, q["concept_id"])}
+
+
+def _book_of(con, concept_id: int) -> int | None:
+    r = con.execute("SELECT book_id FROM concepts WHERE id=?", (concept_id,)).fetchone()
+    return r["book_id"] if r else None
 
 
 def concept_progress(con: sqlite3.Connection, concept_id: int) -> dict:
