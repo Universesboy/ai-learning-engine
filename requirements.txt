@@ -9,4 +9,4 @@ openai>=1.30  # optional: OpenAI-compatible providers
 json-repair>=0.57
 pytest>=8
 httpx>=0.27
-# optional, for the 生成动画 button: pip install manim  (needs TeX + pango/cairo installed first)
+# optional, for the animation button: pip install manim  (needs TeX + pango/cairo installed first)
