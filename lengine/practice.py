@@ -29,7 +29,8 @@ as distractors. Write in {lang}."""
 
 GRADE_SYSTEM = """Grade a learner's answer against the rubric and model answer. Be fair but strict about reasoning.
 Return JSON {"score": 0..1, "error_type": one of %s, "feedback": "2-4 sentences: what is right, what is missing,
-and one question that makes the learner think rather than giving the full answer away", "pages": [N]}""" % ERROR_TYPES
+and one question that makes the learner think rather than giving the full answer away", "pages": [N]}
+Write the feedback in the same language as the question.""" % ERROR_TYPES
 
 
 def generate_questions(con: sqlite3.Connection, llm: LLM, concept_id: int, n: int = 5, lang: str = "Chinese") -> list[dict]:

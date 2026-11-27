@@ -41,3 +41,22 @@ Your books and the `data/` folder are git-ignored: keep copyrighted material out
 ## Test fixture
 `fixtures/econ-ch2-4.pdf` is from OpenStax *Principles of Economics 3e* (Rice University),
 licensed CC BY-NC-SA 4.0: https://openstax.org/details/books/principles-economics-3e
+
+## Real run and cost (measured)
+`PYTHONPATH=. python scripts/run_chapter.py <book.pdf> --chapter 1 --domain psychology --out data/run.md` runs the
+whole flow through the API with a scripted learner: map -> lesson (2 learner turns) -> 6 questions graded -> one
+interactive visual -> dashboard, and prints the cost from `llm_usage`.
+
+Measured 2026-11-27 on chapter 1 of a 345-page Chinese book (9 pages, 10 concepts), Claude API list prices:
+
+| step | model | calls | input tok | output tok | USD |
+|---|---|---|---|---|---|
+| knowledge map | claude-sonnet-5-5 | 1 | 9,363 | 2,765 | 0.0464 |
+| lesson (start + 2 replies) | claude-haiku-5-5 | 3 | 8,158 | 2,528 | 0.0021 |
+| question generation (6) | claude-haiku-5-5 | 1 | 2,187 | 1,640 | 0.0010 |
+| grading (3 open answers) | claude-haiku-5-5 | 3 | 1,481 | 1,045 | 0.0007 |
+| interactive visual | claude-haiku-5-5 | 1 | 2,256 | 4,918 | 0.0027 |
+| **total** | | 9 | 23,445 | 12,896 | **0.0528** |
+
+Wall time 87 s. Extrapolated: one chapter fully studied (map + every concept taught, quizzed and visualised)
+is about $0.11, so about $4 for all 38 chapters of this book; without a visual per concept about $3.
