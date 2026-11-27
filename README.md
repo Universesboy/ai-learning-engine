@@ -15,6 +15,11 @@ Flow: PDF -> chapters + page-tagged chunks -> knowledge map (cited pages, prereq
     # or use an OpenAI-compatible provider instead: LLM_PROVIDER=openai LLM_API_KEY=... LLM_BASE_URL=... LLM_MODEL=...
     uvicorn lengine.api:app --port 8000   # open http://localhost:8000
 
+## Windows
+Double-click `start_windows.bat` (needs Python 3.11+ from python.org). Put `CLAUDE_API_KEY=...` in a `.env` file
+next to it. Your data lives in `data\engine.db`; to move your learning history to another computer, copy the
+`data` folder.
+
 ## Modules
 | file | role | borrowed from |
 |---|---|---|

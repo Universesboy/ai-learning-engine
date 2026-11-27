@@ -65,11 +65,20 @@ const { chromium } = require('playwright');
  if (await sl.count()) { await sl.focus(); for (let i=0;i<5;i++) await p.keyboard.press('ArrowRight'); await p.waitForTimeout(300); }
  await p.screenshot({ path: process.argv[2].replace(/\.html$/, '.png') });
  console.log(JSON.stringify(errs)); await b.close(); })();"""
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+    import shutil
+    node, npm = shutil.which("node"), shutil.which("npm")
+    if not node or not npm:  # no Node/Playwright on this machine (e.g. a plain Windows install): skip the check
+        return []
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
         f.write(script)
-    npm_root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True).stdout.strip()
-    out = subprocess.run(["node", f.name, str(Path(path).resolve())], capture_output=True, text=True,
-                         timeout=120, env={**os.environ, "NODE_PATH": npm_root})
+    try:
+        npm_root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True).stdout.strip()
+        out = subprocess.run([node, f.name, str(Path(path).resolve())], capture_output=True, text=True,
+                             timeout=120, env={**os.environ, "NODE_PATH": npm_root})
+    except Exception as e:
+        return [f"checker failed: {e}"]
+    if "Cannot find module 'playwright'" in out.stderr:
+        return []
     try:
         return json.loads(out.stdout.strip().splitlines()[-1])
     except Exception:

@@ -116,7 +116,12 @@ def artifact(artifact_id: int):
     r = con.execute("SELECT path FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
     if not r or not r["path"]:
         raise HTTPException(404)
-    return FileResponse(r["path"])
+    p = Path(r["path"])
+    if not p.exists():  # database copied from another machine: look in this machine's artifacts folder
+        p = DATA / "artifacts" / p.name
+    if not p.exists():
+        raise HTTPException(404)
+    return FileResponse(p)
 
 
 @app.get("/api/review/due")
