@@ -77,12 +77,12 @@ async function homeView() {
     </div>`).join('')}
     <div class="card"><h3>导入新书（PDF）</h3>
       <input type="file" id="pdf" accept="application/pdf"><div class="row" style="margin-top:8px">
-      <select id="domain"><option value="general">通用</option><option value="economics">经济学</option><option value="investing">投资</option><option value="math_physics">数学物理</option><option value="history">历史</option><option value="programming">编程</option><option value="language">语言</option></select>
+      <select id="domain"><option value="general">通用</option><option value="economics">经济学</option><option value="investing">投资</option><option value="math_physics">数学物理</option><option value="history">历史</option><option value="programming">编程</option><option value="language">语言</option><option value="psychology">心理学</option></select>
       <button class="primary" onclick="upload()">导入</button></div></div>
   </div>
   <h2>最近答题</h2>
   <table><tr><th>时间</th><th>知识点</th><th>层级</th><th>得分</th><th>错因</th></tr>
-  ${d.recent.map(r => `<tr><td class="quiet">${esc(r.created_at)}</td><td>${esc(r.concept)}</td><td>${esc(r.level)}</td><td>${Math.round(r.score*100)}%</td><td>${esc(r.error_type)}</td></tr>`).join('') || '<tr><td colspan="5" class="quiet">暂无</td></tr>'}</table>
+  ${d.recent.map(r => `<tr><td class="quiet">${esc(r.created_at)}</td><td>${esc(r.concept)}</td><td>${esc(r.level)}</td><td>${Math.round(r.score*100)}%</td><td>${esc(ERR[r.error_type] || r.error_type || '')}</td></tr>`).join('') || '<tr><td colspan="5" class="quiet">暂无</td></tr>'}</table>
   <h2>模型用量</h2>
   <table><tr><th>用途</th><th>模型</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>耗时 s</th><th>费用 USD</th></tr>
   ${d.usage.map(u => `<tr><td>${esc(u.purpose)}</td><td>${esc(u.model)}</td><td>${u.calls}</td><td>${u.prompt_tokens}</td><td>${u.completion_tokens}</td><td>${u.seconds}</td><td>${u.usd ?? '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="quiet">暂无</td></tr>'}</table>`;
@@ -103,7 +103,7 @@ async function bookView(id) {
   <div class="grid">
     <div class="card"><div class="quiet">薄弱知识点</div><div class="kpi">${d.weak.length}</div>${d.weak.slice(0,5).map(c=>`<div><a href="#/concept/${c.id}">${esc(c.name)}</a> <span class="chip ${c.status}">${STATUS[c.status]}</span></div>`).join('')}</div>
     <div class="card"><div class="quiet">待复习</div><div class="kpi">${d.due.length}</div>${d.due.slice(0,5).map(c=>`<div><a href="#/concept/${c.concept_id}">${esc(c.name)}</a> <span class="quiet">记住概率 ${Math.round(c.retrievability*100)}%</span></div>`).join('')}</div>
-    <div class="card"><div class="quiet">错题</div><div class="kpi">${d.mistakes.length}</div>${d.mistakes.slice(0,3).map(m=>`<div class="quiet">${esc(m.concept)}：${esc(m.error_type)}</div>`).join('')}</div>
+    <div class="card"><div class="quiet">错题</div><div class="kpi">${d.mistakes.length}</div>${d.mistakes.slice(0,3).map(m=>`<div class="quiet">${esc(m.concept)}：${esc(ERR[m.error_type] || m.error_type)}</div>`).join('')}</div>
   </div>
   <h2>章节</h2>
   ${d.chapters.map(ch => `<div class="card" style="margin-bottom:10px">
@@ -116,7 +116,7 @@ async function bookView(id) {
   </div>`).join('')}
   <h2>学习路径</h2><ol>${d.path.map(p => `<li><a href="#/concept/${p.id}">${esc(p.name)}</a></li>`).join('') || '<li class="quiet">先建立知识地图</li>'}</ol>
   <h2>错题本</h2><table><tr><th>知识点</th><th>题目</th><th>你的回答</th><th>反馈</th></tr>
-  ${d.mistakes.map(m => `<tr><td>${esc(m.concept)}<div class="quiet">${esc(m.error_type)}</div></td><td>${md(m.prompt)}</td><td>${esc(m.response)}</td><td>${md(m.feedback)}</td></tr>`).join('') || '<tr><td colspan="4" class="quiet">暂无</td></tr>'}</table>`;
+  ${d.mistakes.map(m => `<tr><td>${esc(m.concept)}<div class="quiet">${esc(ERR[m.error_type] || m.error_type)}</div></td><td>${md(m.prompt)}</td><td>${esc(m.response)}</td><td>${md(m.feedback)}</td></tr>`).join('') || '<tr><td colspan="4" class="quiet">暂无</td></tr>'}</table>`;
 }
 
 async function buildMap(chId, btn) { btn.disabled = true; btn.textContent = '正在阅读本章…'; try { await post(`/chapters/${chId}/map`); route(); } catch (e) { btn.textContent = '失败：' + e.message; } }
@@ -154,11 +154,12 @@ async function sendReply() {
   box.insertAdjacentHTML('beforebegin', teacherMsg(r) + (r.step === 'practice' ? '<div class="quiet">理解得不错，可以去做练习了。</div>' : ''));
 }
 
+const ERR = {none:'—', misconception:'概念误解', incomplete:'回答不完整', calculation:'计算错误', misread_question:'审题错误', cannot_transfer:'不会迁移应用', forgot_fact:'记忆遗忘'};
 async function loadQuiz(id, btn) {
   btn.disabled = true; const qs = await post(`/concepts/${id}/questions`); btn.disabled = false;
   $('#quiz').innerHTML = qs.map(q => `<div class="card" style="margin-bottom:10px" id="q${q.id}">
     <div class="quiet">${q.level} · ${q.qtype}</div><p>${md(q.prompt)}</p>
-    ${q.choices ? q.choices.map(ch => `<label style="display:block"><input type="radio" name="r${q.id}" value="${esc(ch)}"> ${esc(ch)}</label>`).join('')
+    ${q.choices && q.choices.length ? q.choices.map(ch => `<label style="display:block"><input type="radio" name="r${q.id}" value="${esc(ch)}"> ${esc(ch)}</label>`).join('')
       : q.qtype === 'true_false' ? `<label><input type="radio" name="r${q.id}" value="true"> 对</label> <label><input type="radio" name="r${q.id}" value="false"> 错</label>`
       : `<textarea rows="${q.qtype === 'fill_in' ? 1 : 4}" id="t${q.id}"></textarea>`}
     <div class="row" style="margin-top:6px"><button onclick="submitAnswer(${q.id}, this)">提交</button></div><div class="fb"></div></div>`).join('');
@@ -167,7 +168,7 @@ async function submitAnswer(qid, btn) {
   const sel = document.querySelector(`input[name=r${qid}]:checked`), t = $('#t' + qid);
   const response = sel ? sel.value : (t ? t.value : ''); if (!response) return;
   btn.disabled = true; const r = await post(`/questions/${qid}/answer`, {response});
-  $(`#q${qid} .fb`).innerHTML = `<p><b>${Math.round(r.score*100)}%</b> ${r.error_type !== 'none' ? '· 错因：' + esc(r.error_type) : ''}</p><p>${md(r.feedback)}</p>
+  $(`#q${qid} .fb`).innerHTML = `<p><b>${Math.round(r.score*100)}%</b> ${r.error_type !== 'none' ? '· 错因：' + esc(ERR[r.error_type] || r.error_type) : ''}</p><p>${md(r.feedback)}</p>
     <p class="quiet">掌握状态：${STATUS[r.status.status]}（${Math.round(r.status.mastery*100)}%）· 下次复习：${esc(r.next_review.slice(0,10))}</p>`;
 }
 </script>

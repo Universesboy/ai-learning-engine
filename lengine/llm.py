@@ -8,6 +8,7 @@ OpenAI-compatible env: LLM_PROVIDER=openai, LLM_API_KEY, LLM_BASE_URL, LLM_MODEL
 """
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import sqlite3
@@ -15,6 +16,9 @@ import time
 from typing import Protocol
 
 from json_repair import repair_json
+
+# The book a model call is for, so the dashboard can show cost per book (set by complete_json).
+current_book: contextvars.ContextVar[int | None] = contextvars.ContextVar("current_book", default=None)
 
 
 class LLM(Protocol):
@@ -43,8 +47,8 @@ class OpenAICompatLLM:
             temperature=0.3, **kwargs)
         if self.con is not None and resp.usage:
             self.con.execute(
-                "INSERT INTO llm_usage(purpose, model, prompt_tokens, completion_tokens, seconds) VALUES (?,?,?,?,?)",
-                (purpose, model, resp.usage.prompt_tokens, resp.usage.completion_tokens, time.time() - t0))
+                "INSERT INTO llm_usage(purpose, model, prompt_tokens, completion_tokens, seconds, book_id) VALUES (?,?,?,?,?,?)",
+                (purpose, model, resp.usage.prompt_tokens, resp.usage.completion_tokens, time.time() - t0, current_book.get()))
             self.con.commit()
         return resp.choices[0].message.content or ""
 
@@ -98,8 +102,8 @@ class ClaudeLLM:
             u = resp.usage
             prompt = (u.input_tokens or 0) + (u.cache_read_input_tokens or 0) + (u.cache_creation_input_tokens or 0)
             self.con.execute(
-                "INSERT INTO llm_usage(purpose, model, prompt_tokens, completion_tokens, seconds) VALUES (?,?,?,?,?)",
-                (purpose, model, prompt, u.output_tokens, time.time() - t0))
+                "INSERT INTO llm_usage(purpose, model, prompt_tokens, completion_tokens, seconds, book_id) VALUES (?,?,?,?,?,?)",
+                (purpose, model, prompt, u.output_tokens, time.time() - t0, current_book.get()))
             self.con.commit()
         return "".join(b.text for b in resp.content if b.type == "text")
 
@@ -117,8 +121,17 @@ def make_llm(con: sqlite3.Connection | None = None) -> LLM:
     return OpenAICompatLLM(con)
 
 
-def complete_json(llm: LLM, system: str, user: str, purpose: str, retries: int = 2) -> dict:
+def complete_json(llm: LLM, system: str, user: str, purpose: str, retries: int = 2, book_id: int | None = None) -> dict:
     """Ask for JSON, repair near-misses (json-repair, same approach as DeepTutor/OpenMAIC), retry otherwise."""
+    token = current_book.set(book_id) if book_id is not None else None
+    try:
+        return _complete_json(llm, system, user, purpose, retries)
+    finally:
+        if token is not None:
+            current_book.reset(token)
+
+
+def _complete_json(llm: LLM, system: str, user: str, purpose: str, retries: int) -> dict:
     last = ""
     for _ in range(retries + 1):
         last = llm.complete(system, user, purpose=purpose, json_mode=True)

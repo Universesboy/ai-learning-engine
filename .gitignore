@@ -8,3 +8,4 @@ __pycache__/
 .venv/
 .env
 media/
+web/node_modules/

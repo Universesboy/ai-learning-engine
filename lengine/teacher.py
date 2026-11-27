@@ -52,7 +52,8 @@ def start_lesson(con: sqlite3.Connection, llm: LLM, concept_id: int, lang: str =
     system = (TEACH_SYSTEM.replace("{mastery}", str(prog["mastery"]))
               .replace("{errors}", ", ".join(_errors(con, concept_id)) or "none").replace("{lang}", lang))
     data = complete_json(llm, system, f"Concept: {c['name']}\nSummary: {c['summary']}\n"
-                         f"Misconceptions: {c['confusions']}\nExcerpts:\n{_context(con, c)}", purpose="teach")
+                         f"Misconceptions: {c['confusions']}\nExcerpts:\n{_context(con, c)}", purpose="teach",
+                         book_id=c["book_id"])
     transcript = [{"role": "teacher", **data}]
     sid = con.execute("INSERT INTO sessions(book_id, chapter_id, concept_id, step, transcript, updated_at) "
                       "VALUES (?,?,?,?,?,datetime('now'))",
@@ -69,7 +70,7 @@ def respond(con: sqlite3.Connection, llm: LLM, session_id: int, message: str, la
                         f" {t.get('check_question') or t.get('next_question') or ''}" for t in transcript[-6:])
     data = complete_json(llm, FOLLOWUP_SYSTEM.replace("{lang}", lang),
                          f"Concept: {c['name']}\nExcerpts:\n{_context(con, c)}\n\nConversation so far:\n{history}\n\n"
-                         f"Learner: {message}", purpose="teach")
+                         f"Learner: {message}", purpose="teach", book_id=c["book_id"])
     transcript += [{"role": "learner", "text": message}, {"role": "teacher", **data}]
     step = "apply" if data.get("understood") else "check"
     if s["step"] == "apply" and data.get("understood"):

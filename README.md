@@ -1,4 +1,4 @@
-# AI Learning Engine (MVP)
+# AI Learning Engine 2.0
 
 A thin, data-owning learning core with pluggable teaching tools, built after studying
 OpenMAIC, DeepTutor, VisualLearning.Skill, Math-To-Manim, StoryCraft and OpenLingo.
@@ -14,6 +14,25 @@ Flow: PDF -> chapters + page-tagged chunks -> knowledge map (cited pages, prereq
     # override any step, e.g. LLM_MODEL_KNOWLEDGE=claude-haiku-5-5 for the cheapest setup
     # or use an OpenAI-compatible provider instead: LLM_PROVIDER=openai LLM_API_KEY=... LLM_BASE_URL=... LLM_MODEL=...
     uvicorn lengine.api:app --port 8000   # open http://localhost:8000
+
+## Windows
+Double-click `start_windows.bat` (needs Python 3.11+ from python.org). Put `CLAUDE_API_KEY=...` in a `.env` file
+next to it. Your data lives in `data\engine.db`; to move your learning history to another computer, copy the
+`data` folder.
+
+## 2.0 status
+Dashboard rebuilt (React + Vite in `web/`, built files committed to `lengine/static/dist`, so running it needs
+Python only). Pages: Overview (mastery map of every concept, today's reviews, weak points, trend), Knowledge
+Library (book archives with real first-page covers), book detail, learning page, review queue. Knowledge Graph,
+Cross-Book and Insights are marked "开发中" until their phases land; no page shows sample data.
+
+Database changes are numbered migrations (`PRAGMA user_version`) in `lengine/db.py`; before the first migration
+touches an existing database it is copied to `data/engine.db.bak-v<N>-<time>`. Migration 1 fixes a pre-2.0 bug
+where two chapters producing the same concept key were merged (the dashboard offers a one-click repair that
+re-reads only the damaged chapters and keeps learning history).
+
+Front-end development: `cd web && npm install && npm run dev` (proxies `/api` to port 8000); `npm run build`
+writes `lengine/static/dist`.
 
 ## Modules
 | file | role | borrowed from |

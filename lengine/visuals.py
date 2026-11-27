@@ -65,11 +65,20 @@ const { chromium } = require('playwright');
  if (await sl.count()) { await sl.focus(); for (let i=0;i<5;i++) await p.keyboard.press('ArrowRight'); await p.waitForTimeout(300); }
  await p.screenshot({ path: process.argv[2].replace(/\.html$/, '.png') });
  console.log(JSON.stringify(errs)); await b.close(); })();"""
-    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+    import shutil
+    node, npm = shutil.which("node"), shutil.which("npm")
+    if not node or not npm:  # no Node/Playwright on this machine (e.g. a plain Windows install): skip the check
+        return []
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False, encoding="utf-8") as f:
         f.write(script)
-    npm_root = subprocess.run(["npm", "root", "-g"], capture_output=True, text=True).stdout.strip()
-    out = subprocess.run(["node", f.name, str(Path(path).resolve())], capture_output=True, text=True,
-                         timeout=120, env={**os.environ, "NODE_PATH": npm_root})
+    try:
+        npm_root = subprocess.run([npm, "root", "-g"], capture_output=True, text=True).stdout.strip()
+        out = subprocess.run([node, f.name, str(Path(path).resolve())], capture_output=True, text=True,
+                             timeout=120, env={**os.environ, "NODE_PATH": npm_root})
+    except Exception as e:
+        return [f"checker failed: {e}"]
+    if "Cannot find module 'playwright'" in out.stderr:
+        return []
     try:
         return json.loads(out.stdout.strip().splitlines()[-1])
     except Exception:
@@ -81,7 +90,7 @@ def interactive_page(con: sqlite3.Connection, llm: LLM, concept_id: int, out_dir
     c = dict(con.execute("SELECT * FROM concepts WHERE id=?", (concept_id,)).fetchone())
     user = f"Concept: {c['name']}\nSummary: {c['summary']}\nFormulas: {c['formulas']}\nExcerpts:\n{_excerpts(con, c)}"
     system = HTML_SYSTEM.replace("{lang}", lang)
-    data = complete_json(llm, system, user, purpose="visual")
+    data = complete_json(llm, system, user, purpose="visual", book_id=c["book_id"])
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     path = str(Path(out_dir) / f"concept-{concept_id}-sim.html")
     problems: list[str] = []
@@ -91,7 +100,7 @@ def interactive_page(con: sqlite3.Connection, llm: LLM, concept_id: int, out_dir
         if not problems:
             break
         data = complete_json(llm, system, user + f"\n\nYour previous page failed these checks, fix them:\n{problems}\n"
-                             f"Previous HTML:\n{data.get('html','')[:20000]}", purpose="visual")
+                             f"Previous HTML:\n{data.get('html','')[:20000]}", purpose="visual", book_id=c["book_id"])
     aid = con.execute("INSERT INTO artifacts(concept_id, kind, path, meta) VALUES (?,?,?,?)",
                       (concept_id, "interactive_sim", path,
                        j({"title": data.get("title"), "claims": data.get("claims", []), "problems": problems}))).lastrowid
@@ -116,10 +125,10 @@ def manim_animation(con: sqlite3.Connection, llm: LLM, concept_id: int, out_dir:
                     quality: str = "l") -> dict:
     c = dict(con.execute("SELECT * FROM concepts WHERE id=?", (concept_id,)).fetchone())
     ctx = f"Concept: {c['name']}\nSummary: {c['summary']}\nFormulas: {c['formulas']}\nExcerpts:\n{_excerpts(con, c)}"
-    design = complete_json(llm, MANIM_DESIGN, ctx, purpose="visual")
+    design = complete_json(llm, MANIM_DESIGN, ctx, purpose="visual", book_id=c["book_id"])
     if len(design.get("beats", [])) < 3:
         raise ValueError("animation design too thin")
-    code = complete_json(llm, MANIM_CODE, json.dumps(design, ensure_ascii=False), purpose="visual").get("code", "")
+    code = complete_json(llm, MANIM_CODE, json.dumps(design, ensure_ascii=False), purpose="visual", book_id=c["book_id"]).get("code", "")
     work = Path(out_dir) / f"concept-{concept_id}-manim"
     work.mkdir(parents=True, exist_ok=True)
     err = ""
@@ -139,5 +148,5 @@ def manim_animation(con: sqlite3.Connection, llm: LLM, concept_id: int, out_dir:
         else:
             err = "; ".join(probs)
         code = complete_json(llm, MANIM_CODE, json.dumps(design, ensure_ascii=False) +
-                             f"\n\nPrevious code failed:\n{err}\n\nCode:\n{code}", purpose="visual").get("code", "")
+                             f"\n\nPrevious code failed:\n{err}\n\nCode:\n{code}", purpose="visual", book_id=c["book_id"]).get("code", "")
     raise RuntimeError(f"manim render failed: {err[-500:]}")
