@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Learning Engine</title>
+<style>
+:root{--bg:#f7f7f5;--card:#fff;--ink:#1d1d1b;--quiet:#6b6b66;--line:#e4e4df;--accent:#2f6fde;--good:#2e8b57;--warn:#c98a00;--bad:#c0392b}
+@media (prefers-color-scheme:dark){:root{--bg:#161615;--card:#20201e;--ink:#ecece8;--quiet:#a3a39c;--line:#353531;--accent:#6b9cff;--good:#5cc28a;--warn:#e0b040;--bad:#ff7b6b}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,-apple-system,"PingFang SC","Noto Sans SC",sans-serif}
+header{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:17px;margin:0;cursor:pointer}main{max-width:1100px;margin:0 auto;padding:16px}
+.grid{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(240px,1fr))}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.card h3{margin:0 0 6px;font-size:15px}.quiet{color:var(--quiet);font-size:13px}
+.kpi{font-size:26px;font-weight:600}.bar{height:6px;background:var(--line);border-radius:3px;overflow:hidden}.bar i{display:block;height:100%;background:var(--accent)}
+.chip{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px;border:1px solid var(--line)}
+.mastered{color:var(--good);border-color:var(--good)}.shaky,.cannot_apply_yet{color:var(--warn);border-color:var(--warn)}.needs_relearning{color:var(--bad);border-color:var(--bad)}
+button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer}
+button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}button:disabled{opacity:.5}
+table{width:100%;border-collapse:collapse;font-size:14px}td,th{padding:6px 4px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+.chat{display:flex;flex-direction:column;gap:10px}.msg{padding:10px 12px;border-radius:10px;background:var(--bg);white-space:pre-wrap}.msg.me{background:transparent;border:1px solid var(--line);align-self:flex-end;max-width:85%}
+textarea,input[type=text]{width:100%;font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink)}
+iframe{width:100%;height:640px;border:1px solid var(--line);border-radius:10px;background:#fff}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.err{color:var(--bad)}
+svg text{fill:var(--quiet);font-size:11px}
+</style>
+</head>
+<body>
+<header><h1 onclick="go('#/')">AI Learning Engine</h1><span class="quiet" id="status"></span></header>
+<main id="app">加载中…</main>
+<script>
+const $ = s => document.querySelector(s), app = $('#app');
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const md = s => esc(s).replace(/\*\*(.+?)\*\*/g,'<b>$1</b>');
+const STATUS = {not_started:'未开始', needs_relearning:'需重学', shaky:'理解不牢', cannot_apply_yet:'还不会应用', mastered:'已掌握'};
+async function api(path, opts={}) {
+  $('#status').textContent = '处理中…';
+  try { const r = await fetch('/api' + path, opts); const d = await r.json(); if (!r.ok) throw new Error(d.detail || r.status); return d; }
+  finally { $('#status').textContent = ''; }
+}
+const post = (p, body) => api(p, {method:'POST', headers:{'Content-Type':'application/json'}, body: body ? JSON.stringify(body) : undefined});
+function go(h){ location.hash = h; }
+window.onhashchange = route; route();
+
+async function route() {
+  const h = location.hash || '#/';
+  try {
+    let m;
+    if ((m = h.match(/^#\/book\/(\d+)/))) return bookView(+m[1]);
+    if ((m = h.match(/^#\/concept\/(\d+)/))) return conceptView(+m[1]);
+    return homeView();
+  } catch (e) { app.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+function spark(trend) {
+  if (!trend.length) return '<p class="quiet">还没有答题记录</p>';
+  const w = 300, h = 60, n = trend.length, x = i => n === 1 ? w/2 : i * (w - 20) / (n - 1) + 10, y = v => h - 10 - v * (h - 20);
+  const pts = trend.map((t, i) => `${x(i)},${y(t.avg_score)}`).join(' ');
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" role="img" aria-label="每日平均得分"><polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="2"/>${trend.map((t,i)=>`<circle cx="${x(i)}" cy="${y(t.avg_score)}" r="3" fill="var(--accent)"><title>${t.day} 平均 ${Math.round(t.avg_score*100)}%（${t.n} 题）</title></circle>`).join('')}</svg>`;
+}
+
+async function homeView() {
+  const d = await api('/home');
+  app.innerHTML = `
+  <div class="grid">
+    <div class="card"><div class="quiet">今日待复习</div><div class="kpi">${d.due_total}</div></div>
+    <div class="card"><div class="quiet">在学书籍</div><div class="kpi">${d.books.length}</div></div>
+    <div class="card"><div class="quiet">长期得分趋势</div>${spark(d.trend)}</div>
+  </div>
+  <h2>我的书</h2>
+  <div class="grid">${d.books.map(b => `
+    <div class="card" style="cursor:pointer" onclick="go('#/book/${b.id}')">
+      <h3>${esc(b.title)}</h3>
+      <div class="quiet">${b.chapters_done}/${b.chapters} 章完成 · ${b.mastered}/${b.concepts} 个知识点已掌握 · ${b.weak} 个薄弱 · ${b.due} 个待复习</div>
+      <div class="bar"><i style="width:${b.concepts ? 100*b.mastered/b.concepts : 0}%"></i></div>
+    </div>`).join('')}
+    <div class="card"><h3>导入新书（PDF）</h3>
+      <input type="file" id="pdf" accept="application/pdf"><div class="row" style="margin-top:8px">
+      <select id="domain"><option value="general">通用</option><option value="economics">经济学</option><option value="investing">投资</option><option value="math_physics">数学物理</option><option value="history">历史</option><option value="programming">编程</option><option value="language">语言</option></select>
+      <button class="primary" onclick="upload()">导入</button></div></div>
+  </div>
+  <h2>最近答题</h2>
+  <table><tr><th>时间</th><th>知识点</th><th>层级</th><th>得分</th><th>错因</th></tr>
+  ${d.recent.map(r => `<tr><td class="quiet">${esc(r.created_at)}</td><td>${esc(r.concept)}</td><td>${esc(r.level)}</td><td>${Math.round(r.score*100)}%</td><td>${esc(r.error_type)}</td></tr>`).join('') || '<tr><td colspan="5" class="quiet">暂无</td></tr>'}</table>
+  <h2>模型用量</h2>
+  <table><tr><th>用途</th><th>模型</th><th>调用</th><th>输入 token</th><th>输出 token</th><th>耗时 s</th><th>费用 USD</th></tr>
+  ${d.usage.map(u => `<tr><td>${esc(u.purpose)}</td><td>${esc(u.model)}</td><td>${u.calls}</td><td>${u.prompt_tokens}</td><td>${u.completion_tokens}</td><td>${u.seconds}</td><td>${u.usd ?? '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="quiet">暂无</td></tr>'}</table>`;
+}
+
+async function upload() {
+  const f = $('#pdf').files[0]; if (!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  const r = await api(`/books?domain=${$('#domain').value}&title=${encodeURIComponent(f.name.replace(/\.pdf$/,''))}`, {method:'POST', body: fd});
+  go('#/book/' + r.book_id);
+}
+
+async function bookView(id) {
+  const d = await api('/books/' + id);
+  const byCh = ch => d.concepts.filter(c => c.chapter_id === ch.id);
+  app.innerHTML = `
+  <h2>${esc(d.book.title)}</h2><p class="quiet">领域：${esc(d.book.domain)} ${d.book.license ? '· ' + esc(d.book.license) : ''}</p>
+  <div class="grid">
+    <div class="card"><div class="quiet">薄弱知识点</div><div class="kpi">${d.weak.length}</div>${d.weak.slice(0,5).map(c=>`<div><a href="#/concept/${c.id}">${esc(c.name)}</a> <span class="chip ${c.status}">${STATUS[c.status]}</span></div>`).join('')}</div>
+    <div class="card"><div class="quiet">待复习</div><div class="kpi">${d.due.length}</div>${d.due.slice(0,5).map(c=>`<div><a href="#/concept/${c.concept_id}">${esc(c.name)}</a> <span class="quiet">记住概率 ${Math.round(c.retrievability*100)}%</span></div>`).join('')}</div>
+    <div class="card"><div class="quiet">错题</div><div class="kpi">${d.mistakes.length}</div>${d.mistakes.slice(0,3).map(m=>`<div class="quiet">${esc(m.concept)}：${esc(m.error_type)}</div>`).join('')}</div>
+  </div>
+  <h2>章节</h2>
+  ${d.chapters.map(ch => `<div class="card" style="margin-bottom:10px">
+    <div class="row"><h3 style="flex:1">${esc(ch.title)}</h3><span class="quiet">p.${ch.page_start}–${ch.page_end} · ${ch.state}</span>
+    ${ch.concepts ? '' : `<button onclick="buildMap(${ch.id}, this)">建立知识地图</button>`}</div>
+    ${byCh(ch).length ? `<table><tr><th>知识点</th><th>类型</th><th>状态</th><th>遗忘风险</th><th>页码</th></tr>${byCh(ch).map(c => `<tr>
+      <td><a href="#/concept/${c.id}">${esc(c.name)}</a></td><td class="quiet">${c.kind} / ${c.form}</td>
+      <td><span class="chip ${c.status}">${STATUS[c.status]}</span> ${c.mastery ? Math.round(c.mastery*100)+'%' : ''}</td>
+      <td>${c.forgetting_risk == null ? '—' : Math.round(c.forgetting_risk*100)+'%'}</td><td class="quiet">${JSON.parse(c.pages).join(', ')}</td></tr>`).join('')}</table>` : ''}
+  </div>`).join('')}
+  <h2>学习路径</h2><ol>${d.path.map(p => `<li><a href="#/concept/${p.id}">${esc(p.name)}</a></li>`).join('') || '<li class="quiet">先建立知识地图</li>'}</ol>
+  <h2>错题本</h2><table><tr><th>知识点</th><th>题目</th><th>你的回答</th><th>反馈</th></tr>
+  ${d.mistakes.map(m => `<tr><td>${esc(m.concept)}<div class="quiet">${esc(m.error_type)}</div></td><td>${md(m.prompt)}</td><td>${esc(m.response)}</td><td>${md(m.feedback)}</td></tr>`).join('') || '<tr><td colspan="4" class="quiet">暂无</td></tr>'}</table>`;
+}
+
+async function buildMap(chId, btn) { btn.disabled = true; btn.textContent = '正在阅读本章…'; try { await post(`/chapters/${chId}/map`); route(); } catch (e) { btn.textContent = '失败：' + e.message; } }
+
+async function conceptView(id) {
+  const c = await api('/concepts/' + id);
+  app.innerHTML = `
+  <p><a href="#/book/${c.book_id}">← 返回书籍</a></p>
+  <h2>${esc(c.name)} <span class="chip ${c.progress.status}">${STATUS[c.progress.status]}</span></h2>
+  <p>${esc(c.summary)}</p><p class="quiet">教材页码：${JSON.parse(c.pages).join(', ')} · ${c.kind} / ${c.form}</p>
+  <div class="row"><button class="primary" onclick="startLesson(${id}, this)">开始讲解</button>
+    <button onclick="makeVisual(${id}, 'interactive_sim', this)">生成交互演示</button>
+    <button onclick="makeVisual(${id}, 'manim', this)">生成动画</button>
+    <button onclick="loadQuiz(${id}, this)">练习测验</button></div>
+  <div id="visual">${c.artifacts.map(a => artifactHtml(a.id, a.kind)).join('')}</div>
+  <div id="lesson" class="chat" style="margin-top:16px"></div>
+  <div id="quiz" style="margin-top:16px"></div>`;
+}
+
+const artifactHtml = (id, kind) => kind === 'manim' ? `<video controls src="/api/artifacts/${id}" style="width:100%;margin-top:12px"></video>` : `<iframe src="/api/artifacts/${id}" style="margin-top:12px"></iframe>`;
+async function makeVisual(id, kind, btn) { btn.disabled = true; const old = btn.textContent; btn.textContent = '生成中…'; try { const r = await post(`/concepts/${id}/visual?kind=${kind}`); $('#visual').insertAdjacentHTML('afterbegin', artifactHtml(r.artifact_id, kind) + (r.problems && r.problems.length ? `<p class="err">自动检查仍有问题：${esc(r.problems.join('；'))}</p>` : '')); } catch (e) { alert(e.message); } btn.disabled = false; btn.textContent = old; }
+
+let session = null;
+function teacherMsg(t) { return `<div class="msg">${md(t.explanation || t.reply)}${(t.check_question || t.next_question) ? `\n\n<b>问题：</b>${md(t.check_question || t.next_question)}` : ''}</div>`; }
+async function startLesson(id, btn) {
+  btn.disabled = true; const r = await post(`/concepts/${id}/lesson`); session = r.session_id;
+  $('#lesson').innerHTML = `<div class="quiet">推荐教学方式：${r.tools.join(' → ')}</div>` + teacherMsg(r) +
+    `<textarea id="ans" rows="3" placeholder="写下你的回答或追问"></textarea><div><button class="primary" onclick="sendReply()">发送</button></div>`;
+  btn.disabled = false;
+}
+async function sendReply() {
+  const box = $('#ans'), msg = box.value.trim(); if (!msg) return; box.value = '';
+  box.insertAdjacentHTML('beforebegin', `<div class="msg me">${esc(msg)}</div>`);
+  const r = await post(`/sessions/${session}/reply`, {message: msg});
+  box.insertAdjacentHTML('beforebegin', teacherMsg(r) + (r.step === 'practice' ? '<div class="quiet">理解得不错，可以去做练习了。</div>' : ''));
+}
+
+async function loadQuiz(id, btn) {
+  btn.disabled = true; const qs = await post(`/concepts/${id}/questions`); btn.disabled = false;
+  $('#quiz').innerHTML = qs.map(q => `<div class="card" style="margin-bottom:10px" id="q${q.id}">
+    <div class="quiet">${q.level} · ${q.qtype}</div><p>${md(q.prompt)}</p>
+    ${q.choices ? q.choices.map(ch => `<label style="display:block"><input type="radio" name="r${q.id}" value="${esc(ch)}"> ${esc(ch)}</label>`).join('')
+      : q.qtype === 'true_false' ? `<label><input type="radio" name="r${q.id}" value="true"> 对</label> <label><input type="radio" name="r${q.id}" value="false"> 错</label>`
+      : `<textarea rows="${q.qtype === 'fill_in' ? 1 : 4}" id="t${q.id}"></textarea>`}
+    <div class="row" style="margin-top:6px"><button onclick="submitAnswer(${q.id}, this)">提交</button></div><div class="fb"></div></div>`).join('');
+}
+async function submitAnswer(qid, btn) {
+  const sel = document.querySelector(`input[name=r${qid}]:checked`), t = $('#t' + qid);
+  const response = sel ? sel.value : (t ? t.value : ''); if (!response) return;
+  btn.disabled = true; const r = await post(`/questions/${qid}/answer`, {response});
+  $(`#q${qid} .fb`).innerHTML = `<p><b>${Math.round(r.score*100)}%</b> ${r.error_type !== 'none' ? '· 错因：' + esc(r.error_type) : ''}</p><p>${md(r.feedback)}</p>
+    <p class="quiet">掌握状态：${STATUS[r.status.status]}（${Math.round(r.status.mastery*100)}%）· 下次复习：${esc(r.next_review.slice(0,10))}</p>`;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+pydantic>=2
+pypdf>=4
+fsrs>=6.3
+anthropic>=2.14
+openai>=1.30  # optional: OpenAI-compatible providers
+json-repair>=0.57
+manim>=0.19  # optional: animations (needs TeX + pango)
+pytest>=8
+httpx>=0.27

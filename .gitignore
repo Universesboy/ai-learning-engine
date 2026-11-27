@@ -1,0 +1,10 @@
+# Your own books and everything extracted from them stay local (copyright).
+data/
+*.db
+*.pdf
+!fixtures/econ-ch2-4.pdf
+__pycache__/
+.pytest_cache/
+.venv/
+.env
+media/
