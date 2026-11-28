@@ -325,9 +325,10 @@ def _ocr_engine():
 
 def strip_repeated(texts: list[str]) -> list[str]:
     """Drop lines that repeat on at least half the pages (watermarks such as a site URL, running headers).
+    Short lines count too: OCR splits a watermark like "股窜网 / www.gucuan.com" into a 3-character line.
     They carry no content and would otherwise reach the model and the search index on every page."""
     from collections import Counter
-    lines = Counter(l.strip() for t in texts for l in {x.strip() for x in t.splitlines()} if len(l.strip()) >= 4)
+    lines = Counter(l.strip() for t in texts for l in {x.strip() for x in t.splitlines()} if len(l) >= 2)
     common = {l for l, c in lines.items() if c >= max(5, len(texts) * 0.5)}
     if not common:
         return texts
