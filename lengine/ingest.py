@@ -323,8 +323,20 @@ def _ocr_engine():
     return _OCR or None
 
 
+def strip_repeated(texts: list[str]) -> list[str]:
+    """Drop lines that repeat on at least half the pages (watermarks such as a site URL, running headers).
+    They carry no content and would otherwise reach the model and the search index on every page."""
+    from collections import Counter
+    lines = Counter(l.strip() for t in texts for l in {x.strip() for x in t.splitlines()} if len(l.strip()) >= 4)
+    common = {l for l, c in lines.items() if c >= max(5, len(texts) * 0.5)}
+    if not common:
+        return texts
+    return ["\n".join(l for l in t.splitlines() if l.strip() not in common) for t in texts]
+
+
 def write_chapters(con: sqlite3.Connection, book_id: int, chapters: list[Chapter], texts: list[str]) -> None:
     """Chapter rows plus page-tagged chunks (with section titles) for the full-text index."""
+    texts = strip_repeated(texts)
     for ord_, ch in enumerate(chapters):
         ch_id = con.execute(
             "INSERT INTO chapters(book_id, ord, title, page_start, page_end, kind, part, map_status) VALUES (?,?,?,?,?,?,?,?)",

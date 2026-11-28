@@ -57,3 +57,14 @@ def test_long_chapter_is_split_without_losing_pages():
 
 def test_titles_lose_soft_hyphens_and_nuls():
     assert ingest.clean_title("Psy\xadchology of\nHuman\x00 Misjudgment ") == "Psychology of Human Misjudgment"
+
+
+def test_watermark_lines_repeated_on_most_pages_are_dropped():
+    from lengine.ingest import strip_repeated
+    pages = [f"股窜网www.gucuan.com\n第{i}页的正文内容，各不相同。" for i in range(10)]
+    pages[3] = "只有正文，没有水印"
+    out = strip_repeated(pages)
+    assert all("gucuan" not in t for t in out)
+    assert out[0] == "第0页的正文内容，各不相同。" and out[3] == "只有正文，没有水印"
+    short = ["水印水印\n正文"] * 3  # too few pages to call anything a watermark
+    assert strip_repeated(short) == short
