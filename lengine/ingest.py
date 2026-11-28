@@ -38,6 +38,11 @@ KIND_RULES = [  # checked in order against a non-chapter title
 MAP_BY_DEFAULT = {"body", "front", "conclusion"}  # appendix: on request; skip: never
 
 
+def clean_title(title: str) -> str:
+    """Outline titles carry NULs, soft hyphens and line breaks from the PDF."""
+    return re.sub(r"\s+", " ", re.sub(r"[\x00\xad\u200b]", "", title or "")).strip()
+
+
 def _is_chapter(title: str) -> bool:
     return bool(CHAPTER_RE.match(title) or re.match(r"^\d+\s", title))
 
@@ -51,7 +56,7 @@ def _outline(reader: PdfReader) -> list[tuple[int, str, int]]:
                 walk(it, depth + 1)
                 continue
             try:
-                found.append((depth, it.title.strip(), reader.get_destination_page_number(it) + 1))
+                found.append((depth, clean_title(it.title), reader.get_destination_page_number(it) + 1))
             except Exception:
                 continue
     try:
@@ -65,7 +70,7 @@ def _classify(title: str, before_first_chapter: bool) -> str:
     for kind, rx in KIND_RULES:
         if rx.search(title):
             return "front" if kind == "front" and not before_first_chapter else kind
-    return "front" if before_first_chapter else "conclusion"
+    return "front" if before_first_chapter else "body"
 
 
 def _outline_chapters(reader: PdfReader) -> list[tuple[str, int]]:
@@ -73,14 +78,79 @@ def _outline_chapters(reader: PdfReader) -> list[tuple[str, int]]:
     return [(t, p) for d, t, p in _outline(reader) if d <= 1 and _is_chapter(t)]
 
 
+HEADING_RE = re.compile(
+    r"^\s*((?:第\s*[0-9一二三四五六七八九十百零〇两]+\s*章)|(?:chapter\s+(?:\d+|[ivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten)\b))"
+    r"[\s:：.、]*(.{0,60})$", re.I)
+
+
 def _pattern_chapters(pages: list[str]) -> list[tuple[str, int]]:
-    out = []
+    """Chapter headings near the top of a page. Table-of-contents pages (several headings) are ignored,
+    and a heading alone on its line takes the next line as its title."""
+    out: list[tuple[str, int]] = []
+    seen: set[str] = set()
     for i, text in enumerate(pages, start=1):
-        head = "\n".join(text.strip().splitlines()[:4])
-        m = CHAPTER_RE.search(head)
-        if m:
-            out.append((m.group(0).strip(), i))
+        lines = [l.strip() for l in text.strip().splitlines() if l.strip()]
+        if sum(1 for l in lines if HEADING_RE.match(l)) >= 3:
+            continue  # contents page
+        for j, line in enumerate(lines[:5]):
+            m = HEADING_RE.match(line)
+            if not m:
+                continue
+            key = re.sub(r"\s+", "", m.group(1)).lower()
+            if key in seen:
+                break
+            title = m.group(2).strip()
+            if not title and j + 1 < len(lines) and len(lines[j + 1]) <= 40:
+                title = lines[j + 1]
+            seen.add(key)
+            out.append((clean_title(f"{m.group(1)} {title}"), i))
+            break
     return out
+
+
+def _text_tokens(text: str) -> int:
+    cjk = sum(1 for ch in text if "\u3400" <= ch <= "\u9fff")
+    return cjk + (len(text) - cjk) // 4
+
+
+MAX_SEGMENT_TOKENS = 40000   # longer chapters are split so one model call reads all of it
+WINDOW_TOKENS = 15000        # size of page windows when a book has no usable structure
+
+
+def _page_windows(pages: list[str], start: int, end: int, target: int) -> list[tuple[int, int]]:
+    """Consecutive page ranges of about `target` tokens each, cut at page boundaries."""
+    out, s, acc = [], start, 0
+    for p in range(start, end + 1):
+        acc += _text_tokens(pages[p - 1])
+        if acc >= target and p < end:
+            out.append((s, p))
+            s, acc = p + 1, 0
+    out.append((s, end))
+    if len(out) > 1 and sum(_text_tokens(pages[p - 1]) for p in range(*[out[-1][0], out[-1][1] + 1])) < target // 4:
+        last = out.pop()
+        out[-1] = (out[-1][0], last[1])  # fold a short tail into the previous window
+    return out
+
+
+def _split_long(chapters: list["Chapter"], pages: list[str]) -> list["Chapter"]:
+    out: list[Chapter] = []
+    for ch in chapters:
+        tokens = sum(_text_tokens(pages[p - 1]) for p in range(ch.page_start, ch.page_end + 1))
+        if tokens <= MAX_SEGMENT_TOKENS:
+            out.append(ch)
+            continue
+        n = -(-tokens // MAX_SEGMENT_TOKENS)
+        wins = _page_windows(pages, ch.page_start, ch.page_end, -(-tokens // n))
+        for k, (a, b) in enumerate(wins, start=1):
+            out.append(Chapter(f"{ch.title}（{k}/{len(wins)}）", a, b, ch.kind, ch.part,
+                               [(t, p) for t, p in ch.sections if a <= p <= b]))
+    return out
+
+
+def _windows_structure(pages: list[str]) -> list["Chapter"]:
+    n = len(pages)
+    wins = _page_windows(pages, 1, n, WINDOW_TOKENS) if n else []
+    return [Chapter(f"第 {a}–{b} 页", a, b) for a, b in wins] or [Chapter("全文", 1, max(n, 1))]
 
 
 _CJK = r"\u3000-\u303f\u3400-\u9fff\uff00-\uffef"
@@ -117,8 +187,11 @@ def detect_structure(reader: PdfReader | None, pages: list[str]) -> list[Chapter
     chapter_entries = [e for e in entries if e[0] <= 1 and _is_chapter(e[1])]
     if not chapter_entries:
         marks = _pattern_chapters(pages)
+        # a stray "Chapter 19" in running text is not a structure: require a few headings in page order
+        if len(marks) < 3 and n > 40:
+            return _split_long(_windows_structure(pages), pages)
         if not marks:
-            return [Chapter("Full text", 1, n)]
+            return _windows_structure(pages)
         chapter_entries = [(0, t, p) for t, p in marks]
         entries = chapter_entries
     depth = min(d for d, _, _ in chapter_entries)
@@ -148,7 +221,13 @@ def detect_structure(reader: PdfReader | None, pages: list[str]) -> list[Chapter
                 if ch.page_start <= p <= ch.page_end:
                     ch.sections.append((t, p))
                     break
-    return out
+    if out and out[0].page_start > 1:  # pages before the first entry are never dropped
+        lead = "".join(pages[: out[0].page_start - 1])
+        # cover, copyright and contents pages are kept (searchable) but not sent to the model
+        toc = re.search(r"目\s*录|contents", lead[:3000], re.I) and out[0].page_start <= 15
+        out.insert(0, Chapter(f"开头部分（第 1–{out[0].page_start - 1} 页）", 1, out[0].page_start - 1,
+                              "skip" if toc or _text_tokens(lead) < 300 else "front"))
+    return _split_long(out, pages)
 
 
 def detect_chapters(reader: PdfReader, pages: list[str]) -> list[Chapter]:
@@ -170,31 +249,41 @@ def chunk_page(text: str, max_chars: int = 1200) -> list[str]:
 
 
 def extract_pages(path: str, ocr: bool = True, progress=None) -> list[tuple[str, str]]:
-    """Text of every page as (text, method). Born-digital pages use pdfium's text layer (fast, no OCR);
-    a page with almost no text but real content is OCR'd with RapidOCR when it is installed."""
+    """Text of every page as (text, method). Born-digital pages use pdfium's text layer (fast, no OCR).
+    A page whose only text is a watermark or header repeated across the book, or that has no text at all
+    but is not blank, is OCR'd with RapidOCR when it is installed."""
     import pypdfium2 as pdfium
+    from collections import Counter
     pdf = pdfium.PdfDocument(path)
-    out: list[tuple[str, str]] = []
-    engine = None
     try:
+        texts = []
         for i in range(len(pdf)):
             page = pdf[i]
             tp = page.get_textpage()
-            text = tp.get_text_range()
+            texts.append(tp.get_text_range().replace("\r\n", "\n"))
             tp.close()
-            method = "text"
-            if ocr and len(re.sub(r"\s", "", text)) < 15 and _has_image(page, pdfium):
-                engine = engine or _ocr_engine()
-                if engine is not None:
-                    import numpy as np
-                    res = engine(np.array(page.render(scale=2).to_pil().convert("RGB")))
-                    ocr_text = "\n".join(res.txts or []) if res is not None else ""
-                    if len(ocr_text.strip()) > len(text.strip()):
-                        text, method = ocr_text, "ocr"
             page.close()
-            out.append((text.replace("\r\n", "\n"), method))
+        lines = Counter(l.strip() for t in texts for l in set(t.splitlines()) if len(l.strip()) >= 4)
+        common = {l for l, c in lines.items() if c >= max(5, len(texts) * 0.5)}  # watermarks, running headers
+        out: list[tuple[str, str]] = []
+        engine = None
+        for i, text in enumerate(texts):
+            method = "text"
+            own = "".join(l for l in text.splitlines() if l.strip() not in common)
+            if ocr and len(re.sub(r"\s", "", own)) < 15:
+                page = pdf[i]
+                if _has_image(page, pdfium) or not _looks_blank(page):
+                    engine = engine or _ocr_engine()
+                    if engine is not None:
+                        import numpy as np
+                        res = engine(np.array(page.render(scale=2).to_pil().convert("RGB")))
+                        ocr_text = "\n".join(res.txts or []) if res is not None else ""
+                        if len(ocr_text.strip()) > len(own.strip()):
+                            text, method = ocr_text, "ocr"
+                page.close()
+            out.append((text, method))
             if progress:
-                progress(i + 1, len(pdf))
+                progress(i + 1, len(texts))
     finally:
         pdf.close()
     return out
@@ -209,6 +298,16 @@ def _has_image(page, pdfium) -> bool:
         return next(page.get_objects(filter=[pdfium.raw.FPDF_PAGEOBJ_IMAGE], max_depth=2), None) is not None
     except Exception:
         return True
+
+
+def _looks_blank(page) -> bool:
+    """A quick low-resolution render: a page with no ink skips OCR."""
+    try:
+        import numpy as np
+        img = np.asarray(page.render(scale=0.25, grayscale=True).to_pil())
+        return float(img.std()) < 2.0
+    except Exception:
+        return False
 
 
 def _ocr_engine():

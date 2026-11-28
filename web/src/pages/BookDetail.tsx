@@ -1,6 +1,6 @@
 import { Fragment, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { BookSummary, Concept, ERR_LABEL, KIND_LABEL, LEVEL_LABEL, STATUS_LABEL, STATUS_ORDER, Status, domainLabel, fmtDate, patch, post, pct } from '../api'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { api, BookSummary, Concept, ERR_LABEL, KIND_LABEL, LEVEL_LABEL, STATUS_LABEL, STATUS_ORDER, Status, domainLabel, fmtDate, patch, post, pct } from '../api'
 import { useApi } from '../hooks'
 import { Cover, Dot, ErrorBox, Legend, Pill, RepairBanner, Skeleton, StatusMeter } from '../components/ui'
 import { JobPanel } from '../components/JobPanel'
@@ -45,6 +45,42 @@ function EditDialog({ d, onSaved }: { d: Detail; onSaved: () => void }) {
             <button className="btn primary" disabled={busy}>保存</button>
           </div>
         </form>
+      </dialog>
+    </>
+  )
+}
+
+function ManageDialog({ d, onDone }: { d: Detail; onDone: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null)
+  const nav = useNavigate()
+  const [busy, setBusy] = useState<string | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const [reocr, setReocr] = useState(false)
+  const history = d.summary.started > 0
+  const go = async (what: 'reprocess' | 'delete') => {
+    setBusy(what); setErr(null)
+    try {
+      if (what === 'reprocess') { await post(`/books/${d.book.id}/reprocess?reocr=${reocr}`); ref.current?.close(); onDone() }
+      else { await api(`/books/${d.book.id}`, { method: 'DELETE' }); ref.current?.close(); nav('/library') }
+    } catch (e: any) { setErr(e.message) } finally { setBusy(null) }
+  }
+  return (
+    <>
+      <button className="btn small ghost" onClick={() => ref.current?.showModal()}>重新处理或删除</button>
+      <dialog ref={ref}>
+        <h2>重新处理或删除</h2>
+        <p className="muted" style={{ marginTop: 8 }}>
+          重新处理会用最新的导入规则重新识别章节、切分内容，原来的章节和知识点会被替换，然后停在确认费用那一步。适合章节识别错了、扫描版没识别出文字的书。
+        </p>
+        {history && <p className="error" style={{ marginTop: 8 }}>这本书已经有学习记录，为了不丢记录，重新处理和删除都不可用。</p>}
+        <label className="check faint" style={{ marginTop: 12 }}><input type="checkbox" checked={reocr} onChange={e => setReocr(e.target.checked)} />
+          重新提取文字（扫描版重新做 OCR，较慢）</label>
+        {err && <p className="error" style={{ marginTop: 8 }}>{err}</p>}
+        <div className="row" style={{ marginTop: 18, justifyContent: 'flex-end' }}>
+          <button className="btn ghost" onClick={() => ref.current?.close()}>取消</button>
+          <button className="btn" disabled={history || !!busy} onClick={() => go('delete')} style={{ color: 'var(--m-relearn)' }}>{busy === 'delete' ? '正在删除……' : '删除这本书'}</button>
+          <button className="btn primary" disabled={history || !!busy} onClick={() => go('reprocess')}>{busy === 'reprocess' ? '正在开始……' : '重新处理'}</button>
+        </div>
       </dialog>
     </>
   )
@@ -138,6 +174,7 @@ export default function BookDetail() {
   const { id } = useParams()
   const { data: d, error, reload } = useApi<Detail>(`/books/${id}`)
   const [tab, setTab] = useState<Tab>('章节结构')
+  const [jobKey, setJobKey] = useState(0)
   if (error) return <ErrorBox message={error} retry={reload} />
   if (!d) return <div className="stack"><Skeleton h={180} /><Skeleton h={400} /></div>
   const s = d.summary
@@ -161,12 +198,12 @@ export default function BookDetail() {
             <div className="figure"><b className="num">{s.due}</b><span className="faint">今日待复习</span></div>
           </div>
           <StatusMeter counts={counts} total={s.concepts} />
-          <div className="row"><Legend /><span className="spacer" /><EditDialog d={d} onSaved={reload} /></div>
+          <div className="row"><Legend /><span className="spacer" /><ManageDialog d={d} onDone={() => { reload(); setJobKey(k => k + 1) }} /><EditDialog d={d} onSaved={reload} /></div>
           <p className="faint">这本书累计花费 ${d.usage.usd.toFixed(2)}（{d.usage.items.map(u => `${PURPOSE[u.purpose] ?? u.purpose} ${u.calls} 次`).join('，') || '暂无调用记录'}）。2.0 之前的调用没有按书记录。</p>
         </div>
       </section>
 
-      <JobPanel bookId={d.book.id} onChange={reload} />
+      <JobPanel key={jobKey} bookId={d.book.id} onChange={reload} />
 
       <div className="tabs" role="tablist">
         {TABS.map(t => <button key={t} role="tab" className="tab" aria-selected={tab === t} onClick={() => setTab(t)}>{t}</button>)}

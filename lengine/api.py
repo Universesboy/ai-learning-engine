@@ -188,6 +188,43 @@ def confirm(job_id: int, body: Confirm | None = None):
     return pipeline.job_view(con, job_id)
 
 
+@app.post("/api/books/{book_id}/reprocess")
+def reprocess(book_id: int, reocr: bool = False, force: bool = False):
+    """Re-import from the PDF with the current rules; the old structure and maps are replaced."""
+    _book_or_404(book_id)
+    src = _pdf_path(book_id)
+    if not src:
+        raise HTTPException(409, "这台电脑上找不到这本书的 PDF 文件，请把它放回 data/books 或重新上传")
+    con.execute("UPDATE books SET source_path=? WHERE id=?", (str(src), book_id))
+    con.commit()
+    runner.start()
+    try:
+        job_id = runner.reprocess(book_id, reocr=reocr, force=force)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"book_id": book_id, "job_id": job_id}
+
+
+@app.delete("/api/books/{book_id}")
+def delete_book(book_id: int, force: bool = False):
+    _book_or_404(book_id)
+    if con.execute("SELECT 1 FROM jobs WHERE book_id=? AND status IN ('queued','running')", (book_id,)).fetchone():
+        raise HTTPException(409, "这本书正在处理中，等处理停下后再删除")
+    n = pipeline.learning_history(con, book_id)
+    if n and not force:
+        raise HTTPException(409, f"这本书已有 {n} 条学习记录，删除后无法恢复")
+    src = _pdf_path(book_id)
+    pipeline.clear_book(con, book_id, keep_pages=False)
+    con.execute("DELETE FROM job_stages WHERE job_id IN (SELECT id FROM jobs WHERE book_id=?)", (book_id,))
+    con.execute("DELETE FROM jobs WHERE book_id=?", (book_id,))
+    con.execute("DELETE FROM books WHERE id=?", (book_id,))
+    con.commit()
+    if src and (DATA / "books").resolve() in src.resolve().parents:  # only the app's own copy
+        src.unlink(missing_ok=True)
+    (DATA / "covers" / f"{book_id}.jpg").unlink(missing_ok=True)
+    return dashboard.library(con)
+
+
 @app.post("/api/jobs/{job_id}/retry")
 def retry(job_id: int):
     _job_or_404(job_id)
@@ -225,6 +262,16 @@ def edit_book(book_id: int, body: BookEdit):
     return dashboard.library(con)
 
 
+def _pdf_path(book_id: int) -> Path | None:
+    """The book's PDF on this computer: its recorded path, or a file of the same name in data/books."""
+    r = con.execute("SELECT source_path FROM books WHERE id=?", (book_id,)).fetchone()
+    src = Path((r and r["source_path"]) or "")
+    for cand in (src, DATA / "books" / src.name):
+        if cand.name and cand.exists():
+            return cand
+    return None
+
+
 @app.get("/api/books/{book_id}/cover")
 def cover(book_id: int):
     """The book's real first page, rendered once and cached. 404 when the PDF is not on this machine."""
@@ -234,10 +281,8 @@ def cover(book_id: int):
     cached = DATA / "covers" / f"{book_id}.jpg"
     if cached.exists():
         return FileResponse(cached, headers={"Cache-Control": "max-age=86400"})
-    src = Path(r["source_path"] or "")
-    if not src.exists():
-        src = DATA / "books" / src.name
-    if not src.name or not src.exists():
+    src = _pdf_path(book_id)
+    if not src:
         raise HTTPException(404, "PDF not available on this computer")
     import pypdfium2 as pdfium
     cached.parent.mkdir(parents=True, exist_ok=True)

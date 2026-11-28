@@ -96,3 +96,34 @@ def test_restart_resumes_interrupted_job(tmp_path, monkeypatch):
     r.start()
     j = wait_job(c, up["job_id"], until=("done", "partial", "failed"))
     assert j["status"] == "done"
+
+
+def test_reprocess_rebuilds_structure_and_delete_removes_book(tmp_path, monkeypatch):
+    api, c = _app(tmp_path, monkeypatch, FakeLLM())
+    with PDF.open("rb") as f:
+        up = c.post("/api/books", files={"file": ("econ.pdf", f, "application/pdf")}).json()
+    wait_job(c, up["job_id"])
+    n_chunks = api.con.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    r = c.post(f"/api/books/{up['book_id']}/reprocess").json()
+    assert r["job_id"] != up["job_id"]
+    j = wait_job(c, r["job_id"])
+    assert j["status"] == "waiting"
+    assert api.con.execute("SELECT count(*) FROM chunks").fetchone()[0] == n_chunks  # replaced, not doubled
+    fts = api.con.execute("SELECT count(*) FROM chunks_fts WHERE chunks_fts MATCH 'demand'").fetchone()[0]
+    assert 0 < fts <= n_chunks
+    assert c.get(f"/api/books/{up['book_id']}/job").json()["id"] == r["job_id"]
+    assert c.delete(f"/api/books/{up['book_id']}").json() == []
+    assert api.con.execute("SELECT count(*) FROM chunks").fetchone()[0] == 0
+    assert not list((tmp_path / "books").glob("*.pdf"))
+
+
+def test_reprocess_refuses_when_learning_history_exists(tmp_path, monkeypatch):
+    api, c = _app(tmp_path, monkeypatch, FakeLLM())
+    with PDF.open("rb") as f:
+        up = c.post("/api/books?auto_map=true", files={"file": ("econ.pdf", f, "application/pdf")}).json()
+    wait_job(c, up["job_id"], until=("done", "partial", "failed"))
+    cid = api.con.execute("SELECT id FROM concepts LIMIT 1").fetchone()[0]
+    api.con.execute("INSERT INTO cards(concept_id, state, due) VALUES (?, '{}', '2030-01-01')", (cid,))
+    api.con.commit()
+    r = c.post(f"/api/books/{up['book_id']}/reprocess")
+    assert r.status_code == 409 and "学习记录" in r.json()["detail"]

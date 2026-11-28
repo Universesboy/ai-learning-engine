@@ -122,6 +122,19 @@ class Runner:
         self.con.commit()
         self.kick()
 
+    def reprocess(self, book_id: int, reocr: bool = False, force: bool = False) -> int:
+        """Rebuilds a book from its PDF with the current import code (old imports, fixed structure rules)."""
+        if self.con.execute("SELECT 1 FROM jobs WHERE book_id=? AND status IN ('queued','running')", (book_id,)).fetchone():
+            raise ValueError("这本书正在处理中")
+        n = learning_history(self.con, book_id)
+        if n and not force:
+            raise ValueError(f"这本书已有 {n} 条学习记录，重新处理会删除它们")
+        self.con.execute("UPDATE jobs SET status='superseded' WHERE book_id=? AND status IN ('waiting','failed','partial')", (book_id,))
+        clear_book(self.con, book_id, keep_pages=not reocr)
+        self.con.execute("UPDATE books SET status='processing', updated_at=datetime('now') WHERE id=?", (book_id,))
+        self.con.commit()
+        return self.create_job(book_id, {"reprocess": True})
+
     def kick(self) -> None:
         self._wake.set()
 
@@ -299,6 +312,31 @@ class Runner:
     def _classify(self, book_id: int) -> str:
         dups = duplicate_concepts(self.con, book_id)
         return f"知识点类型已校验；发现 {len(dups)} 组可能重复的知识点" if dups else "知识点类型已校验，未发现重复"
+
+
+def learning_history(con, book_id: int) -> int:
+    """Attempts, review cards, lessons and visuals on this book's concepts: never thrown away silently."""
+    q = "SELECT count(*) FROM {t} WHERE concept_id IN (SELECT id FROM concepts WHERE book_id=?)"
+    return sum(con.execute(q.format(t=t), (book_id,)).fetchone()[0] for t in ("attempts", "cards", "sessions", "artifacts"))
+
+
+def clear_book(con, book_id: int, keep_pages: bool = True) -> None:
+    """Removes everything derived from the PDF (structure, chunks, concepts, links) so it can be rebuilt."""
+    concept_ids = "SELECT id FROM concepts WHERE book_id=?"
+    con.execute("DELETE FROM chunks_fts WHERE rowid IN (SELECT id FROM chunks WHERE book_id=?)", (book_id,))
+    con.execute("DELETE FROM vectors WHERE kind='chunk' AND owner_id IN (SELECT id FROM chunks WHERE book_id=?)", (book_id,))
+    con.execute(f"DELETE FROM vectors WHERE kind='concept' AND owner_id IN ({concept_ids})", (book_id,))
+    for t, cols in (("prerequisites", ("concept_id", "requires_id")), ("relations", ("source_id", "target_id")),
+                    ("relation_checks", ("a", "b"))):
+        for col in cols:
+            con.execute(f"DELETE FROM {t} WHERE {col} IN ({concept_ids})", (book_id,))
+    for t in ("questions", "attempts", "cards", "sessions", "artifacts"):
+        con.execute(f"DELETE FROM {t} WHERE concept_id IN ({concept_ids})", (book_id,))
+    for t in ("concepts", "chunks", "chapters"):
+        con.execute(f"DELETE FROM {t} WHERE book_id=?", (book_id,))
+    if not keep_pages:
+        con.execute("DELETE FROM pages WHERE book_id=?", (book_id,))
+    con.commit()
 
 
 def duplicate_concepts(con, book_id: int) -> list[list[dict]]:

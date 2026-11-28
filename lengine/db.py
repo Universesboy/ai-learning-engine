@@ -148,7 +148,34 @@ def _m2_processing_pipeline(con) -> None:
     con.execute("UPDATE chapters SET map_status='done' WHERE map_built_at IS NOT NULL AND map_status IS NULL")
 
 
-MIGRATIONS = [_m1_book_metadata_and_chapter_scoped_keys, _m2_processing_pipeline]
+def _m3_knowledge_links(con) -> None:
+    """Phase 4: local embeddings, evidence-backed relations between concepts (within and across books),
+    every judged pair remembered (so nothing is paid for twice), chapter cases, cross-book questions."""
+    _script(con, """
+    CREATE TABLE IF NOT EXISTS vectors (
+      kind TEXT NOT NULL, owner_id INTEGER NOT NULL, model TEXT NOT NULL, hash TEXT, vec BLOB NOT NULL,
+      PRIMARY KEY (kind, owner_id, model)
+    );
+    CREATE TABLE IF NOT EXISTS relations (
+      id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL, target_id INTEGER NOT NULL, type TEXT NOT NULL,
+      rationale TEXT, source_quote TEXT, source_page INTEGER, target_quote TEXT, target_page INTEGER,
+      confidence REAL, similarity REAL, method TEXT NOT NULL DEFAULT 'model', model TEXT,
+      created_at TEXT DEFAULT (datetime('now')), UNIQUE(source_id, target_id, type)
+    );
+    CREATE TABLE IF NOT EXISTS relation_checks (
+      a INTEGER NOT NULL, b INTEGER NOT NULL, result TEXT NOT NULL, checked_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (a, b)
+    );
+    CREATE TABLE IF NOT EXISTS questions_crossbook (
+      id INTEGER PRIMARY KEY, question TEXT NOT NULL, book_ids TEXT, answer TEXT, created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_rel_source ON relations(source_id);
+    CREATE INDEX IF NOT EXISTS idx_rel_target ON relations(target_id)
+    """)
+    _add_column(con, "chapters", "cases", "TEXT")
+
+
+MIGRATIONS = [_m1_book_metadata_and_chapter_scoped_keys, _m2_processing_pipeline, _m3_knowledge_links]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
