@@ -146,3 +146,42 @@ def learning_path(con: sqlite3.Connection, book_id: int, chapter_id: int | None 
         order.append(cs[ready[0]])
         done.add(ready[0])
     return order
+
+
+CHAPTER_SYSTEM = """You summarise ONE chapter of a book for a learner, using ONLY the chapter text given.
+Every item must cite the page numbers [p.N] where the text supports it.
+Return JSON: {"summary": "3-5 sentences: what the chapter argues and why it matters",
+ "core_ideas": [{"text": "one core idea in one sentence", "pages": [N]}],
+ "arguments": [{"claim": "a key claim the author makes", "evidence": "how the author supports it", "pages": [N]}],
+ "cases": [{"name": "case, experiment, story or example", "point": "what it shows", "pages": [N]}]}
+3-6 core ideas, 2-5 arguments, up to 6 cases. Keep the author's own position; do not add outside knowledge.
+Write in {lang}."""
+
+
+def summarize_chapter(con: sqlite3.Connection, llm: LLM, chapter_id: int, lang: str = "Chinese") -> dict:
+    """Core ideas, key arguments and cases of a chapter, each with pages inside the chapter (others dropped)."""
+    ch = dict(con.execute("SELECT * FROM chapters WHERE id=?", (chapter_id,)).fetchone())
+    text = _numbered(ingest.chapter_text(con, chapter_id))
+    data = complete_json(llm, CHAPTER_SYSTEM.replace("{lang}", lang),
+                         f"Chapter: {ch['title']} (pages {ch['page_start']}-{ch['page_end']})\n\n{text}",
+                         purpose="chapter", book_id=ch["book_id"])
+
+    def cited(items):
+        out = []
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            pages = sorted({int(p) for p in it.get("pages", []) if str(p).isdigit()
+                            and ch["page_start"] <= int(p) <= ch["page_end"]})
+            if pages:
+                out.append({**it, "pages": pages})
+        return out
+
+    result = {"summary": str(data.get("summary") or "").strip(), "core_ideas": cited(data.get("core_ideas")),
+              "arguments": cited(data.get("arguments")), "cases": cited(data.get("cases"))}
+    if not result["summary"]:
+        raise ValueError("chapter summary is empty")
+    con.execute("UPDATE chapters SET summary=?, core_ideas=?, arguments=?, cases=? WHERE id=?",
+                (result["summary"], j(result["core_ideas"]), j(result["arguments"]), j(result["cases"]), chapter_id))
+    con.commit()
+    return result

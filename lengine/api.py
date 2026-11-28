@@ -14,7 +14,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import dashboard, db, ingest, knowledge, maintenance, pipeline, practice, teacher, visuals
+from . import crossbook, dashboard, db, ingest, knowledge, maintenance, pipeline, practice, relations, teacher, visuals
 from .llm import cost_usd, make_llm
 
 DATA = Path(os.environ.get("ENGINE_DATA", "data"))
@@ -75,6 +75,15 @@ class Reply(BaseModel):
 
 class Answer(BaseModel):
     response: str
+
+
+class LinkRequest(BaseModel):
+    book_ids: list[int]
+
+
+class Question(BaseModel):
+    question: str
+    book_ids: list[int] | None = None
 
 
 class Confirm(BaseModel):
@@ -327,6 +336,7 @@ def concept(concept_id: int):
                                         "ORDER BY a.id DESC LIMIT 20", (concept_id,)))
     c["progress"] = practice.concept_progress(con, concept_id)
     c["artifacts"] = db.rows(con.execute("SELECT id, kind, meta FROM artifacts WHERE concept_id=?", (concept_id,)))
+    c["relations"] = relations.for_concept(con, concept_id)
     return c
 
 
@@ -379,6 +389,62 @@ def artifact(artifact_id: int):
 def due():
     from . import review
     return review.due_cards(con)
+
+
+@app.get("/api/books/{book_id}/relations")
+def book_relations(book_id: int):
+    _book_or_404(book_id)
+    return relations.for_book(con, book_id)
+
+
+@app.get("/api/graph")
+def graph():
+    return dashboard.graph(con)
+
+
+@app.get("/api/links")
+def links():
+    """Relation counts plus, per book, whether it is linked yet (for the graph page's call to action)."""
+    books = db.rows(con.execute(
+        "SELECT b.id, b.title, (SELECT count(*) FROM concepts c WHERE c.book_id=b.id) concepts, "
+        "(SELECT count(*) FROM vectors v JOIN concepts c ON c.id=v.owner_id AND v.kind='concept' WHERE c.book_id=b.id) embedded, "
+        "(SELECT count(*) FROM chapters ch WHERE ch.book_id=b.id AND ch.summary IS NOT NULL) summarized FROM books b ORDER BY b.id"))
+    job = con.execute("SELECT id FROM jobs WHERE kind='link' ORDER BY id DESC LIMIT 1").fetchone()
+    return {"stats": relations.stats(con), "books": books, "job": pipeline.job_view(con, job["id"]) if job else None}
+
+
+@app.post("/api/links")
+def link_books(body: LinkRequest):
+    """Starts linking: embeddings are computed at once (free); the model steps wait for the cost OK."""
+    ids = [b for b in body.book_ids if con.execute("SELECT 1 FROM concepts WHERE book_id=? LIMIT 1", (b,)).fetchone()]
+    if not ids:
+        raise HTTPException(400, "所选的书还没有知识点，先整理知识点再建立关联")
+    if con.execute("SELECT 1 FROM jobs WHERE status IN ('queued','running')").fetchone():
+        raise HTTPException(409, "有书正在处理中，处理完再建立关联")
+    runner.start()
+    jid = runner.create_link_job(ids)
+    return pipeline.job_view(con, jid)
+
+
+@app.post("/api/crossbook")
+def ask_crossbook(body: Question):
+    q = body.question.strip()
+    if len(q) < 2:
+        raise HTTPException(400, "问题太短")
+    return crossbook.answer(con, llm(), q, body.book_ids)
+
+
+@app.get("/api/crossbook")
+def crossbook_history():
+    return crossbook.history(con)
+
+
+@app.get("/api/crossbook/{qid}")
+def crossbook_get(qid: int):
+    r = crossbook.get(con, qid)
+    if r is None:
+        raise HTTPException(404)
+    return r
 
 
 @app.get("/{path:path}", response_class=HTMLResponse, include_in_schema=False)

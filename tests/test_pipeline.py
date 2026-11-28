@@ -49,7 +49,7 @@ def test_upload_waits_for_cost_confirmation(tmp_path, monkeypatch):
     assert j["status"] == "done", j["error"]
     assert j["chapters_done"] == j["chapters_total"] > 0 and j["progress"] == 1.0
     st = {s["stage"]: s["status"] for s in j["stages"]}
-    assert st["embed"] == "skipped" and st["complete"] == "done"
+    assert st["embed"] == "done" and st["graph"] == "done" and st["materials"] == "skipped" and st["complete"] == "done"
     assert "issues" in j["report"] and j["concepts"] > 0
     assert c.get("/api/jobs?active=1").json() == []
 

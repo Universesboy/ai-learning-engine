@@ -14,7 +14,7 @@ from fsrs import Card
 
 from . import mastery, review
 from .db import rows
-from .llm import cost_usd
+from .llm import cost_usd, rates
 
 STATUS_WEAK = ("needs_relearning", "shaky", "cannot_apply_yet")
 
@@ -71,14 +71,26 @@ def _concepts(con, book_id: int | None, now: datetime) -> list[dict]:
 
 
 def _usage(con, book_id: int | None = None) -> dict:
-    sql = ("SELECT purpose, model, count(*) calls, sum(prompt_tokens) prompt_tokens, sum(completion_tokens) completion_tokens,"
-           " round(sum(seconds),1) seconds FROM llm_usage" + (" WHERE book_id=?" if book_id else "") + " GROUP BY purpose, model")
-    items = rows(con.execute(sql, (book_id,) if book_id else ()))
+    # priced per call band: Haiku's higher card applies to single prompts over 100k tokens, not to totals
+    sql = ("SELECT purpose, model, prompt_tokens > 100000 big, count(*) calls, sum(prompt_tokens) prompt_tokens, "
+           "sum(completion_tokens) completion_tokens, round(sum(seconds),1) seconds FROM llm_usage"
+           + (" WHERE book_id=?" if book_id else "") + " GROUP BY purpose, model, big")
+    merged: dict[tuple, dict] = {}
+    for u in rows(con.execute(sql, (book_id,) if book_id else ())):
+        pt, ct = u["prompt_tokens"] or 0, u["completion_tokens"] or 0
+        r = rates(u["model"], bool(u["big"]))
+        c = None if r is None else (pt * r[0] + ct * r[1]) / 1e6
+        m = merged.setdefault((u["purpose"], u["model"]), {"purpose": u["purpose"], "model": u["model"], "calls": 0,
+                                                            "prompt_tokens": 0, "completion_tokens": 0, "seconds": 0.0, "usd": 0.0})
+        m["calls"] += u["calls"]; m["prompt_tokens"] += pt; m["completion_tokens"] += ct; m["seconds"] += u["seconds"] or 0
+        m["usd"] = None if c is None or m["usd"] is None else m["usd"] + c
+    items = list(merged.values())
     total = 0.0
     for u in items:
-        c = cost_usd(u["model"], u["prompt_tokens"] or 0, u["completion_tokens"] or 0)
-        u["usd"] = round(c, 4) if c is not None else None
-        total += c or 0
+        u["seconds"] = round(u["seconds"], 1)
+        if u["usd"] is not None:
+            u["usd"] = round(u["usd"], 4)
+            total += u["usd"]
     return {"items": items, "usd": round(total, 4), "calls": sum(u["calls"] for u in items)}
 
 
@@ -206,7 +218,7 @@ def book_detail(con: sqlite3.Connection, book_id: int, now: datetime | None = No
         ch["weak"] = sum(c["status"] in STATUS_WEAK for c in cs)
         ch["due"] = sum(1 for c in cs if c["due"] and c["due"] <= due_cut)
         ch["needs_repair"] = ch["id"] in repair_ids
-        for k in ("core_ideas", "arguments"):
+        for k in ("core_ideas", "arguments", "cases"):
             ch[k] = json.loads(ch.get(k) or "[]")
     from . import practice
     return {"book": book, "summary": _book_summary(book, concepts, chapters, due_cut), "chapters": chapters,
@@ -227,6 +239,27 @@ def field(con: sqlite3.Connection, now: datetime | None = None) -> dict:
                          for ch in sorted(chapters.values(), key=lambda ch: (order.get(ch["book_id"], 0), ch["ord"]))],
             "concepts": [[c["id"], c["chapter_id"], c["name"], c["status"],
                           None if c["forgetting_risk"] is None else round(1 - c["forgetting_risk"], 2)] for c in concepts]}
+
+
+def graph(con: sqlite3.Connection, now: datetime | None = None) -> dict:
+    """Everything the knowledge graph page draws: books, chapters (topic level), concepts with mastery,
+    evidence-backed relations and the chapter maps' own prerequisites. The page builds its views client-side."""
+    now = now or datetime.now(timezone.utc)
+    concepts = _concepts(con, None, now)
+    books = rows(con.execute("SELECT id, title, author FROM books ORDER BY id"))
+    count = defaultdict(int)
+    for c in concepts:
+        count[c["chapter_id"]] += 1
+    chapters = [{"id": r["id"], "book_id": r["book_id"], "ord": r["ord"], "title": r["title"], "concepts": count[r["id"]],
+                 "summary": r["summary"]} for r in con.execute("SELECT id, book_id, ord, title, summary FROM chapters ORDER BY book_id, ord")
+                if count[r["id"]]]
+    return {
+        "books": books, "chapters": chapters,
+        "concepts": [[c["id"], c["chapter_id"], c["book_id"], c["name"], c["status"]] for c in concepts],
+        "relations": [[r[0], r[1], r[2], r[3], r[4]] for r in con.execute(
+            "SELECT id, source_id, target_id, type, confidence FROM relations")],
+        "prerequisites": [[r[0], r[1]] for r in con.execute("SELECT concept_id, requires_id FROM prerequisites")],
+    }
 
 
 # kept for the scripted run and older callers

@@ -33,7 +33,10 @@ STAGES = [
     ("segment", "章节切分"), ("chunk", "内容分块"), ("knowledge", "知识提取"), ("classify", "知识分类与去重"),
     ("embed", "向量化"), ("graph", "知识图谱整合"), ("materials", "学习材料"), ("complete", "处理完成"),
 ]
-LATER = {"embed": "Phase 4 开发中", "graph": "Phase 4 开发中", "materials": "学习时按需生成"}
+LATER = {"materials": "学习时按需生成"}
+LINK_STAGES = [("embed", "向量化"), ("summaries", "章节要点"), ("relations", "关系发现"), ("complete", "完成")]
+SUMMARY_USD = 0.003       # Haiku 5.5 per chapter summary (measured scale: ~9k tokens in, ~1.2k out)
+PAIRS_PER_CONCEPT = 2.2   # judged candidate pairs per new concept (思考，快与慢: 915 pairs / 428 concepts)
 MAP_WORKERS = 5
 MAX_ATTEMPTS = 3
 RETRY_DELAY = 2.0  # seconds, grows with each attempt
@@ -56,8 +59,11 @@ def estimate_map_cost(con, book_id: int, chapter_ids: list[int] | None = None) -
         text = "".join(r["text"] for r in con.execute("SELECT text FROM chunks WHERE chapter_id=?", (cid,)))
         tin += min(estimate_tokens(text), 90000) + 1200
         tout += 2700
-    return {"chapters": len(ids), "input_tokens": tin, "output_tokens": tout,
-            "usd": round((tin * SONNET_IN + tout * SONNET_OUT) / 1e6, 2)}
+    map_usd = (tin * SONNET_IN + tout * SONNET_OUT) / 1e6
+    from .relations import BATCH
+    link_usd = len(ids) * SUMMARY_USD + len(ids) * 11 * PAIRS_PER_CONCEPT / BATCH * 0.0023  # Haiku per relation call, measured
+    return {"chapters": len(ids), "input_tokens": tin, "output_tokens": tout, "map_usd": round(map_usd, 2),
+            "link_usd": round(link_usd, 2), "usd": round(map_usd + link_usd, 2)}
 
 
 class Runner:
@@ -94,15 +100,15 @@ class Runner:
     def confirm_map(self, job_id: int, chapter_ids: list[int] | None = None) -> None:
         """The learner accepted the estimate: run the model stages (optionally for chosen chapters only)."""
         job = self._job(job_id)
-        if chapter_ids:
+        if chapter_ids and job["kind"] != "link":
             self.con.execute(f"UPDATE chapters SET map_status='pending', map_error=NULL WHERE book_id=? AND id IN "
                              f"({','.join('?' * len(chapter_ids))})", (job["book_id"], *chapter_ids))
-        else:
+        elif job["kind"] != "link":
             self.con.execute("UPDATE chapters SET map_status='pending', map_error=NULL, map_attempts=0 "
                              "WHERE book_id=? AND map_status='failed'", (job["book_id"],))
         opts = json.loads(job["options"] or "{}")
         opts["map_confirmed"] = True
-        for s in ("knowledge", "classify", "complete"):
+        for s in (("summaries", "relations", "complete") if job["kind"] == "link" else ("knowledge", "classify", "complete")):
             self._stage(job_id, s, status="pending", error=None)
         self.con.execute("UPDATE jobs SET status='queued', options=?, error=NULL, updated_at=datetime('now') WHERE id=?",
                          (j(opts), job_id))
@@ -172,6 +178,8 @@ class Runner:
         return self.con.execute("SELECT status FROM job_stages WHERE job_id=? AND stage=?", (job_id, stage)).fetchone()[0]
 
     def _run(self, job: dict) -> None:
+        if job["kind"] == "link":
+            return self._run_link(job)
         jid, book_id = job["id"], job["book_id"]
         opts = json.loads(job["options"] or "{}")
         self.con.execute("UPDATE jobs SET status='running', updated_at=datetime('now') WHERE id=?", (jid,))
@@ -250,7 +258,8 @@ class Runner:
         est = estimate_map_cost(self.con, book_id)
         self.con.execute("UPDATE jobs SET estimate_usd=? WHERE id=?", (est["usd"], jid))
         if not (opts.get("auto_map") or opts.get("map_confirmed")):
-            self._stage(jid, "knowledge", status="waiting", note=f"等待确认：{est['chapters']} 章，预计 ${est['usd']:.2f}")
+            self._stage(jid, "knowledge", status="waiting",
+                        note=f"等待确认：{est['chapters']} 章，预计 ${est['usd']:.2f}（知识点 ${est['map_usd']:.2f}，章节要点和跨书关联 ${est['link_usd']:.2f}）")
             self.con.execute("UPDATE jobs SET status='waiting', stage='knowledge', updated_at=datetime('now') WHERE id=?", (jid,))
             self.con.execute("UPDATE books SET status='ready' WHERE id=?", (book_id,))
             self.con.commit()
@@ -259,6 +268,8 @@ class Runner:
         if not step("knowledge", lambda: self._map_chapters(jid, book_id)):
             return
         step("classify", lambda: self._classify(book_id))
+        step("embed", lambda: self._embed(jid, "embed", [book_id]))
+        step("graph", lambda: self._link(jid, "graph", [book_id]))
         for s, note in LATER.items():
             if self._status(jid, s) == "pending":
                 self._stage(jid, s, status="skipped", note=note)
@@ -308,6 +319,100 @@ class Runner:
         if failed == len(todo):
             raise RuntimeError(f"全部 {failed} 章失败，请检查 API Key 或网络")
         return f"{done()} / {planned} 章" + (f"，{failed} 章失败可重试" if failed else "")
+
+    # ---- Phase 4: embeddings, chapter summaries, relations -----------------------------------------
+    def create_link_job(self, book_ids: list[int], auto: bool = False) -> int:
+        """Links existing books: embed (free), then wait for the cost OK, then summaries and relations."""
+        jid = self.con.execute("INSERT INTO jobs(book_id, kind, status, stage, options) VALUES (?,?,?,?,?)",
+                               (book_ids[0] if len(book_ids) == 1 else None, "link", "queued", "embed",
+                                j({"book_ids": book_ids, "map_confirmed": auto}))).lastrowid
+        self.con.executemany("INSERT INTO job_stages(job_id, stage, ord, status) VALUES (?,?,?,?)",
+                             [(jid, st, i, "pending") for i, (st, _) in enumerate(LINK_STAGES)])
+        self.con.commit()
+        self.kick()
+        return jid
+
+    def _embed(self, jid: int, stage: str, book_ids: list[int]) -> str:
+        from . import embed
+        n = 0
+        for b in book_ids:
+            n += embed.index_book(self.con, b, progress=lambda d, t: self._stage(jid, stage, done=d, total=t))["embedded"]
+        total = self.con.execute(f"SELECT count(*) FROM concepts WHERE book_id IN ({','.join('?' * len(book_ids))})",
+                                 book_ids).fetchone()[0]
+        return f"{total} 个知识点已向量化（本次新增 {n}），在本机计算，不花钱"
+
+    def link_estimate(self, book_ids: list[int]) -> dict:
+        from . import relations
+        q = ",".join("?" * len(book_ids))
+        todo = self.con.execute(f"SELECT count(*) FROM chapters WHERE book_id IN ({q}) AND map_built_at IS NOT NULL "
+                                f"AND summary IS NULL", book_ids).fetchone()[0]
+        rel = relations.estimate(self.con, book_ids)
+        return {"chapters": todo, "summaries_usd": round(todo * SUMMARY_USD, 2), **{f"rel_{k}": v for k, v in rel.items()},
+                "usd": round(todo * SUMMARY_USD + rel["usd"], 2)}
+
+    def _link(self, jid: int, stage: str, book_ids: list[int]) -> str:
+        """Chapter summaries for mapped chapters without one, then relation discovery for these books."""
+        from . import embed, relations
+        llm = self.llm_factory()
+        q = ",".join("?" * len(book_ids))
+        chs = [r[0] for r in self.con.execute(f"SELECT id FROM chapters WHERE book_id IN ({q}) AND map_built_at IS NOT NULL "
+                                              f"AND summary IS NULL ORDER BY book_id, ord", book_ids)]
+        failed = 0
+        def summ(cid):
+            try:
+                knowledge.summarize_chapter(self.con, llm, cid)
+                return True
+            except Exception:
+                log.exception("summary of chapter %s", cid)
+                return False
+        with ThreadPoolExecutor(max_workers=MAP_WORKERS) as pool:
+            for k, ok in enumerate(pool.map(summ, chs), start=1):
+                failed += not ok
+                self._stage(jid, stage, done=k, total=len(chs), note=f"章节要点 {k} / {len(chs)}")
+        for b in book_ids:  # chapter summaries get vectors too (for the topic-level graph and questions)
+            embed.index_book(self.con, b)
+        pairs = relations.candidates(self.con, book_ids)
+        self._stage(jid, stage, done=0, total=len(pairs), note=f"关系发现：{len(pairs)} 对候选")
+        st = relations.judge(self.con, llm, pairs, progress=lambda d, t: self._stage(jid, stage, done=d, total=t))
+        kept = sum(v for k, v in st.items() if k in relations.TYPES)
+        dropped = st.get("unverified", 0)
+        return (f"{len(chs) - failed} 章要点；{len(pairs)} 对候选，建立 {kept} 条关系"
+                + (f"，{dropped} 条因引用核对不上被丢弃" if dropped else "") + (f"；{failed} 章要点失败" if failed else ""))
+
+    def _run_link(self, job: dict) -> None:
+        jid = job["id"]
+        opts = json.loads(job["options"] or "{}")
+        book_ids = opts.get("book_ids") or []
+        self.con.execute("UPDATE jobs SET status='running', updated_at=datetime('now') WHERE id=?", (jid,))
+        self.con.commit()
+        try:
+            if self._status(jid, "embed") != "done":
+                self._stage(jid, "embed", status="running", error=None, note=None)
+                self._stage(jid, "embed", status="done", note=self._embed(jid, "embed", book_ids))
+            if not opts.get("map_confirmed"):
+                est = self.link_estimate(book_ids)
+                self.con.execute("UPDATE jobs SET estimate_usd=?, status='waiting', stage='summaries', updated_at=datetime('now') "
+                                 "WHERE id=?", (est["usd"], jid))
+                self._stage(jid, "summaries", status="waiting",
+                            note=f"等待确认：{est['chapters']} 章要点 + {est['rel_pairs']} 对候选关系，预计 ${est['usd']:.2f}")
+                return
+            for st in ("summaries", "relations"):
+                if self._status(jid, st) == "done":
+                    continue
+                self._stage(jid, st, status="running", error=None, note=None)
+            note = self._link(jid, "relations", book_ids)
+            self._stage(jid, "summaries", status="done", note="见关系发现")
+            self._stage(jid, "relations", status="done", note=note)
+            self._stage(jid, "complete", status="done", note=note)
+            self.con.execute("UPDATE jobs SET status='done', finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?", (jid,))
+            self.con.commit()
+        except Exception as e:
+            log.exception("link job %s", jid)
+            self.con.execute("UPDATE job_stages SET status='failed', error=? WHERE job_id=? AND status='running'",
+                             (f"{type(e).__name__}: {e}"[:500], jid))
+            self.con.execute("UPDATE jobs SET status='failed', error=?, updated_at=datetime('now') WHERE id=?",
+                             (f"建立关联失败：{e}"[:500], jid))
+            self.con.commit()
 
     def _classify(self, book_id: int) -> str:
         dups = duplicate_concepts(self.con, book_id)
@@ -389,7 +494,7 @@ def job_view(con, job_id: int) -> dict:
     job = dict(con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
     stages = rows(con.execute("SELECT stage, ord, status, done, total, note, error, started_at, finished_at FROM job_stages "
                               "WHERE job_id=? ORDER BY ord", (job_id,)))
-    labels = dict(STAGES)
+    labels = {**dict(STAGES), **dict(LINK_STAGES)}
     for s in stages:
         s["label"] = labels.get(s["stage"], s["stage"])
     chapters = rows(con.execute("SELECT id, title, kind, map_status, map_error, page_start, page_end FROM chapters "
@@ -397,9 +502,10 @@ def job_view(con, job_id: int) -> dict:
     planned = [c for c in chapters if c["map_status"] not in ("not_planned", None)]
     weights = {"done": 1, "skipped": 1}
     progress = 0.0
+    heavy = "relations" if job["kind"] == "link" else "knowledge"
     for s in stages:  # the model stage dominates the wall time, so it carries most of the bar
-        w = 0.7 if s["stage"] == "knowledge" else 0.3 / (len(stages) - 1)
-        if s["stage"] == "knowledge" and s["total"]:
+        w = 0.7 if s["stage"] == heavy else 0.3 / (len(stages) - 1)
+        if s["stage"] == heavy and s["total"] and s["status"] != "done":
             progress += w * (s["done"] / s["total"])
         else:
             progress += w * weights.get(s["status"], 0)

@@ -24,6 +24,10 @@
   --m-shaky: #d58a1f;     /* understood a little */
   --m-apply: #3a8fd9;     /* can recall/understand, not apply yet */
   --m-mastered: #13987b;  /* mastered */
+  /* relation types (graph edges) and books (graph topic nodes) */
+  --r-similar: #8a84c9; --r-supports: #2f9e6f; --r-contradicts: #d9475f; --r-extends: #3a7fd0;
+  --r-prereq: #7c8799; --r-applies: #c98516; --r-example: #b155b8;
+  --b1: #4f52e3; --b2: #13987b; --b3: #d58a1f; --b4: #c2417a; --b5: #2f86c9; --b6: #7a5bd1;
 
   --shadow-1: 0 1px 2px rgba(22, 28, 43, 0.05), 0 2px 8px rgba(22, 28, 43, 0.04);
   --shadow-2: 0 2px 4px rgba(22, 28, 43, 0.04), 0 12px 32px -8px rgba(22, 28, 43, 0.12);
@@ -37,7 +41,7 @@
     --bg: #0d1220; --bg-raised: #151b2c; --bg-sunken: #0a0e19; --glass: rgba(21, 27, 44, 0.72);
     --ink: #e8ebf3; --ink-2: #aab2c5; --ink-3: #7a8399; --line: #232b40; --line-strong: #323c56;
     --iris: #8d8fff; --iris-soft: rgba(141, 143, 255, 0.14);
-    --m-none: #46506a; --m-relearn: #ff6b84; --m-shaky: #f0a93e; --m-apply: #5cb1ff; --m-mastered: #2fd1a8;
+    --m-none: #46506a; --m-relearn: #ff6b84; --m-shaky: #f0a93e; --m-apply: #5cb1ff; --m-mastered: #2fd1a8; --r-similar: #a9a4ec; --r-supports: #43c58f; --r-contradicts: #ff6b84; --r-extends: #6aa8ff; --r-prereq: #8d97ab; --r-applies: #f0a93e; --r-example: #d37cda; --b1: #8d8fff; --b2: #2fd1a8; --b3: #f0a93e; --b4: #f06ba6; --b5: #5cb1ff; --b6: #a98bff;
     --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3); --shadow-2: 0 16px 40px -12px rgba(0, 0, 0, 0.55);
     color-scheme: dark;
   }
@@ -46,7 +50,7 @@
   --bg: #0d1220; --bg-raised: #151b2c; --bg-sunken: #0a0e19; --glass: rgba(21, 27, 44, 0.72);
   --ink: #e8ebf3; --ink-2: #aab2c5; --ink-3: #7a8399; --line: #232b40; --line-strong: #323c56;
   --iris: #8d8fff; --iris-soft: rgba(141, 143, 255, 0.14);
-  --m-none: #46506a; --m-relearn: #ff6b84; --m-shaky: #f0a93e; --m-apply: #5cb1ff; --m-mastered: #2fd1a8;
+  --m-none: #46506a; --m-relearn: #ff6b84; --m-shaky: #f0a93e; --m-apply: #5cb1ff; --m-mastered: #2fd1a8; --r-similar: #a9a4ec; --r-supports: #43c58f; --r-contradicts: #ff6b84; --r-extends: #6aa8ff; --r-prereq: #8d97ab; --r-applies: #f0a93e; --r-example: #d37cda; --b1: #8d8fff; --b2: #2fd1a8; --b3: #f0a93e; --b4: #f06ba6; --b5: #5cb1ff; --b6: #a98bff;
   --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3); --shadow-2: 0 16px 40px -12px rgba(0, 0, 0, 0.55);
   color-scheme: dark;
 }
@@ -292,3 +296,47 @@ dialog::backdrop { background: rgba(10, 14, 25, .45); backdrop-filter: blur(3px)
 .pulse { animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+
+/* ---------- knowledge graph ---------- */
+.graph-panel { padding: 14px; }
+.graph-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 30px; }
+.graph-title { font-size: 15px; }
+.graph-filters { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; align-items: center; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; border-radius: 99px; border: 1px solid var(--line);
+  background: var(--bg-raised); color: var(--ink-2); font-size: 12.5px; cursor: pointer; white-space: nowrap; }
+.chip[aria-pressed="false"] { opacity: .45; }
+.chip[aria-pressed="true"] { border-color: var(--line-strong); color: var(--ink); }
+.swatch { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.swatch.line { width: 14px; height: 3px; border-radius: 2px; }
+.select.small { height: 28px; font-size: 12.5px; padding: 0 8px; width: auto; }
+.graph-wrap { position: relative; }
+.graph-canvas { height: 620px; border-radius: var(--r-m); background: var(--bg-sunken); overflow: hidden; }
+.graph-detail { position: absolute; top: 10px; right: 10px; bottom: 10px; width: min(380px, calc(100% - 20px)); overflow: auto;
+  background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--r-m); padding: 16px; box-shadow: 0 8px 30px rgba(0,0,0,.12); }
+.graph-detail .close { position: absolute; top: 8px; right: 8px; font-size: 18px; }
+.graph-detail h3 { padding-right: 28px; }
+.rel-card { border-top: 1px solid var(--line); padding: 10px 0; font-size: 13.5px; }
+.rel-card:first-of-type { border-top: 0; }
+.rel-type { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 99px; margin-right: 6px;
+  color: var(--c); background: color-mix(in srgb, var(--c) 14%, transparent); }
+.rel-card blockquote { margin: 6px 0 0; padding: 4px 10px; border-left: 3px solid var(--line-strong); color: var(--ink-2); font-size: 13px; }
+.rel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 420px), 1fr)); gap: 0 24px; }
+.rel-grid .rel-card:first-of-type { border-top: 1px solid var(--line); }
+.chapter-notes h4 { margin: 12px 0 4px; font-size: 13px; color: var(--ink-2); }
+.chapter-notes ul { margin: 0; padding-left: 20px; font-size: 14px; display: grid; gap: 3px; }
+
+/* ---------- cross-book ---------- */
+.cross { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 16px; align-items: start; }
+.answer h2 { font-size: 18px; }
+.answer h3 { margin-top: 18px; font-size: 15px; }
+.answer ul { margin: 6px 0 0; padding-left: 20px; display: grid; gap: 8px; }
+.answer-ai { margin-top: 18px; padding: 4px 16px 14px; border-radius: var(--r-m); background: var(--iris-soft); }
+.cite { border: 0; background: var(--bg-sunken); color: var(--iris); font-size: 12px; border-radius: 6px; padding: 1px 6px; margin: 0 2px; cursor: pointer; }
+.cite.on { background: var(--iris); color: #fff; }
+.passage { margin: 8px 0; padding: 10px 12px; border-radius: var(--r-m); border: 1px solid var(--line); background: var(--bg-raised); font-size: 13.5px; }
+.list-item.as-button { width: 100%; border: 0; background: none; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+@media (max-width: 900px) {
+  .cross { grid-template-columns: minmax(0, 1fr); }
+  .graph-canvas { height: 460px; }
+}
+.passage mark { background: color-mix(in srgb, var(--m-shaky) 30%, transparent); color: inherit; border-radius: 3px; padding: 0 2px; }

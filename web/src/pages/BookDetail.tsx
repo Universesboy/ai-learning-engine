@@ -4,11 +4,14 @@ import { api, BookSummary, Concept, ERR_LABEL, KIND_LABEL, LEVEL_LABEL, STATUS_L
 import { useApi } from '../hooks'
 import { Cover, Dot, ErrorBox, Legend, Pill, RepairBanner, Skeleton, StatusMeter } from '../components/ui'
 import { JobPanel } from '../components/JobPanel'
+import { RelationCard, Relation } from '../components/Relations'
 
 interface Chapter {
   id: number; ord: number; title: string; page_start: number; page_end: number; concepts: number; mastered: number
   started: number; weak: number; due: number; needs_repair: boolean; map_built_at: string | null; summary: string | null
   kind: string | null; part: string | null; map_status: string | null; map_error: string | null
+  core_ideas: { text: string; pages: number[] }[]; arguments: { claim: string; evidence: string; pages: number[] }[]
+  cases: { name: string; point: string; pages: number[] }[]
 }
 interface Detail {
   book: { id: number; title: string; author: string | null; category: string | null; domain: string; created_at: string; license: string | null }
@@ -22,7 +25,7 @@ interface Detail {
 
 const TABS = ['章节结构', '知识点', '学习路径', '错题本', '个人笔记', '章节联系'] as const
 type Tab = typeof TABS[number]
-const PURPOSE: Record<string, string> = { knowledge: '知识地图', teach: '讲解', practice: '出题', grading: '判分', visual: '交互演示' }
+const PURPOSE: Record<string, string> = { knowledge: '知识地图', teach: '讲解', practice: '出题', grading: '判分', visual: '交互演示', chapter: '章节要点', relations: '关系判断', crossbook: '跨书问答' }
 
 function EditDialog({ d, onSaved }: { d: Detail; onSaved: () => void }) {
   const ref = useRef<HTMLDialogElement>(null)
@@ -117,9 +120,15 @@ function ChapterCard({ ch, concepts, onMapped }: { ch: Chapter; concepts: Concep
       {err && <p className="error" style={{ fontSize: 13, marginTop: 6 }}>{err}</p>}
       {open && (
         <div className="fade-in">
-          <p className="faint" style={{ marginTop: 12 }}>
-            {ch.summary || '本章核心思想、关键论证与案例将在 Phase 4 由 AI 整理（开发中）。下面是已提取的知识点。'}
-          </p>
+          {ch.summary ? (
+            <div className="chapter-notes">
+              <p style={{ marginTop: 12 }}>{ch.summary}</p>
+              {ch.core_ideas.length > 0 && <><h4>核心思想</h4><ul>{ch.core_ideas.map((x, i) => <li key={i}>{x.text}<span className="faint"> p.{x.pages.join(', ')}</span></li>)}</ul></>}
+              {ch.arguments.length > 0 && <><h4>关键论证</h4><ul>{ch.arguments.map((x, i) => <li key={i}><b>{x.claim}</b> {x.evidence}<span className="faint"> p.{x.pages.join(', ')}</span></li>)}</ul></>}
+              {ch.cases.length > 0 && <><h4>案例</h4><ul>{ch.cases.map((x, i) => <li key={i}><b>{x.name}</b>：{x.point}<span className="faint"> p.{x.pages.join(', ')}</span></li>)}</ul></>}
+              <h4>知识点</h4>
+            </div>
+          ) : <p className="faint" style={{ marginTop: 12 }}>本章还没有整理核心思想和论证，在知识图谱页建立关联时会一起整理。下面是已提取的知识点。</p>}
           <div className="concept-grid">
             {concepts.map(c => (
               <Link key={c.id} to={`/concept/${c.id}`} className="concept-chip">
@@ -167,6 +176,22 @@ function ConceptTable({ concepts, chapters }: { concepts: Concept[]; chapters: C
       </div>
       {list.length > 300 && <p className="faint" style={{ marginTop: 8 }}>只显示前 300 个，用搜索缩小范围。</p>}
     </>
+  )
+}
+
+function BookRelations({ bookId }: { bookId: number }) {
+  const { data, error } = useApi<Relation[]>(`/books/${bookId}/relations`)
+  const [n, setN] = useState(30)
+  if (error) return <ErrorBox message={error} />
+  if (!data) return <Skeleton h={200} />
+  if (!data.length) return <div className="empty">还没有发现有原文依据的联系。到<Link to="/graph" style={{ color: 'var(--iris)' }}>知识图谱</Link>为这本书建立关联。</div>
+  const cross = data.filter(r => r.cross_book).length
+  return (
+    <div className="stack">
+      <p className="faint">{data.length} 条联系，其中 {cross} 条与其他书有关。每条都由 AI 读过双方原文判断，引用已核对。</p>
+      <div className="rel-grid">{data.slice(0, n).map(r => <RelationCard key={r.id} r={r} self={-1} />)}</div>
+      {data.length > n && <button className="btn small" onClick={() => setN(n + 30)}>再显示 30 条</button>}
+    </div>
   )
 }
 
@@ -243,7 +268,7 @@ export default function BookDetail() {
         </div>
       ) : <div className="empty">还没有错题。得分低于 70% 的回答会收进这里。</div>)}
       {tab === '个人笔记' && <div className="empty"><b>开发中（Phase 4）。</b>你可以在书、章节和知识点上写自己的笔记和观点，它们会进入你的个人知识图谱。</div>}
-      {tab === '章节联系' && <div className="empty"><b>开发中（Phase 4）。</b>AI 会阅读各章原文，找出章节之间有依据的联系（支持、延伸、冲突、前置、案例），每条附原文页码。</div>}
+      {tab === '章节联系' && <BookRelations bookId={d.book.id} />}
     </div>
   )
 }

@@ -4,6 +4,11 @@ Model: Qwen3-Embedding-0.6B int8 via fastembed (Apache-2.0, multilingual, so Chi
 align). Chosen in the 2.0 audit over bge-small-zh (Chinese only) and jina-v3 (non-commercial licence).
 Vectors are L2-normalised float32 blobs in SQLite; search is brute-force cosine in numpy, which takes a few
 milliseconds for tens of thousands of vectors, so no vector database is needed.
+
+What gets a vector: concepts (name + summary) and chapter summaries. Text chunks do not: a 0.6B model needs
+several seconds per 1,000-character chunk on a 4-core CPU (measured 2026-11-28), i.e. hours for a large book,
+while concept texts take ~0.2 s each. Concept summaries are written in Chinese for every book, so English and
+Chinese books still meet in one vector space; passages are found by the full-text index (hybrid search).
 """
 from __future__ import annotations
 
@@ -17,7 +22,7 @@ import numpy as np
 MODEL = os.environ.get("EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B-Q")
 DIM = 1024
 QUERY_TASK = "Given a question or a concept, retrieve passages and concepts from books that discuss it"
-MAX_CHARS = 1500  # chunks are ≤1200 characters; long texts are cut to keep CPU time predictable
+MAX_CHARS = 600  # concept and chapter summaries; longer text is cut to keep CPU time predictable
 
 _model = None
 _lock = threading.Lock()
@@ -67,11 +72,11 @@ def index_book(con, book_id: int, progress=None, embedder=None) -> dict:
     todo: list[tuple[str, int, str]] = []
     for c in con.execute("SELECT id, name, summary FROM concepts WHERE book_id=?", (book_id,)):
         todo.append(("concept", c["id"], concept_text(dict(c))))
-    for ch in con.execute("SELECT id, text, section FROM chunks WHERE book_id=?", (book_id,)):
-        todo.append(("chunk", ch["id"], (f"{ch['section']}\n" if ch["section"] else "") + ch["text"]))
+    for ch in con.execute("SELECT id, title, summary FROM chapters WHERE book_id=? AND summary IS NOT NULL", (book_id,)):
+        todo.append(("chapter", ch["id"], f"{ch['title']}：{ch['summary']}"))
     have = {(r[0], r[1]): r[2] for r in con.execute(
-        "SELECT kind, owner_id, hash FROM vectors WHERE model=? AND owner_id IN (SELECT id FROM concepts WHERE book_id=?) AND kind='concept' "
-        "UNION ALL SELECT kind, owner_id, hash FROM vectors WHERE model=? AND kind='chunk' AND owner_id IN (SELECT id FROM chunks WHERE book_id=?)",
+        "SELECT kind, owner_id, hash FROM vectors WHERE model=? AND kind='concept' AND owner_id IN (SELECT id FROM concepts WHERE book_id=?) "
+        "UNION ALL SELECT kind, owner_id, hash FROM vectors WHERE model=? AND kind='chapter' AND owner_id IN (SELECT id FROM chapters WHERE book_id=?)",
         (MODEL, book_id, MODEL, book_id))}
     todo = [t for t in todo if have.get((t[0], t[1])) != _hash(t[2])]
     batch = 64

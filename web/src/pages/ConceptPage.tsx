@@ -4,6 +4,7 @@ import { ERR_LABEL, LEVEL_LABEL, QTYPE_LABEL, Status, STATUS_LABEL, fmtDateTime,
 import { useApi } from '../hooks'
 import { ErrorBox, Pill, Skeleton } from '../components/ui'
 import { Markdown } from '../components/Markdown'
+import { RelationCard, Relation } from '../components/Relations'
 
 interface ConceptData {
   id: number; book_id: number; chapter_id: number; name: string; summary: string; kind: string; form: string
@@ -12,6 +13,7 @@ interface ConceptData {
   artifacts: { id: number; kind: string }[]
   requires: { id: number; name: string }[]; required_by: { id: number; name: string }[]
   attempts: { created_at: string; score: number; error_type: string; level: string; prompt: string }[]
+  relations: Relation[]
 }
 interface Turn { role: 'teacher' | 'me'; text: string; question?: string }
 interface Question { id: number; qtype: string; level: string; prompt: string; choices: string[] | null; pages: number[] }
@@ -177,6 +179,14 @@ export default function ConceptPage() {
             <section className="panel">
               {c.requires.length > 0 && <><h3>先要理解</h3><div className="list">{c.requires.map(r => <Link key={r.id} className="list-item" to={`/concept/${r.id}`}><span className="name">{r.name}</span></Link>)}</div></>}
               {c.required_by.length > 0 && <><h3 style={{ marginTop: c.requires.length ? 14 : 0 }}>学会后可以学</h3><div className="list">{c.required_by.map(r => <Link key={r.id} className="list-item" to={`/concept/${r.id}`}><span className="name">{r.name}</span></Link>)}</div></>}
+            </section>
+          )}
+          {c.relations?.length > 0 && (
+            <section className="panel">
+              <h3>知识关联</h3>
+              <p className="faint">AI 读过双方原文判断的关系，两处引用都核对过。</p>
+              {c.relations.slice(0, 8).map(r => <RelationCard key={r.id} r={r} self={c.id} />)}
+              {c.relations.length > 8 && <Link className="faint" to="/graph">还有 {c.relations.length - 8} 条，在知识图谱里查看</Link>}
             </section>
           )}
           {examples.length > 0 && <section className="panel"><h3>书中的例子</h3><ul className="soon-list">{examples.map((e, i) => <li key={i}>{e}</li>)}</ul></section>}

@@ -60,10 +60,16 @@ PRICES = {
     "claude-sonnet-5-5": (2.00, 10.00), "claude-opus-5-5": (4.00, 20.00),
 }
 # Effort per purpose: thinking tokens are billed as output, so routine steps run at low effort.
-EFFORT = {"knowledge": "medium", "visual": "medium", "teach": "low", "practice": "low", "grading": "low"}
+EFFORT = {"knowledge": "medium", "visual": "medium", "crossbook": "medium", "teach": "low", "practice": "low", "grading": "low"}
+
+
+def rates(model: str, big_prompt: bool = False) -> tuple[float, float] | None:
+    """(input, output) USD per million tokens; big_prompt = a single prompt over 100k tokens."""
+    return PRICES.get(f"{model}>100k" if model == "claude-haiku-5-5" and big_prompt else model)
 
 
 def cost_usd(model: str, prompt_tokens: int, completion_tokens: int) -> float | None:
+    """Cost of ONE call (the Haiku band depends on that call's prompt size)."""
     key = f"{model}>100k" if model == "claude-haiku-5-5" and prompt_tokens > 100_000 else model
     if key not in PRICES:
         return None
@@ -80,7 +86,8 @@ class ClaudeLLM:
         self.con = con
 
     # Agreed setup: Haiku 5.5 everywhere, Sonnet 5.5 for the knowledge map (everything downstream depends on it).
-    PURPOSE_DEFAULTS = {"knowledge": "claude-sonnet-5-5"}
+    # Cross-book answers compare authors' views, where accuracy matters most: Sonnet 5.5 (~$0.03 per question).
+    PURPOSE_DEFAULTS = {"knowledge": "claude-sonnet-5-5", "crossbook": "claude-sonnet-5-5"}
 
     def model_for(self, purpose: str) -> str:
         return os.environ.get(f"LLM_MODEL_{purpose.upper()}", self.PURPOSE_DEFAULTS.get(purpose, self.default))
